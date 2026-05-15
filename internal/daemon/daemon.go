@@ -145,13 +145,58 @@ func (d *Daemon) batchInstruction() string {
 	)
 }
 
-// WebhookPayload accepts a flexible payload — book_id is preferred, title is
-// the fallback. Anything beyond that is logged but ignored.
+// WebhookPayload accepts several shapes:
+//
+//   - flat: {"book_id": "...", "title": "...", "author": "..."}
+//   - flat with id: {"id": "...", "title": "...", "authors": ["X", "Y"]}
+//   - OPDS envelope: {"event": "book.added", "data": { ...same as flat... }}
+//
+// The id is preferred over the title; the title is used as a fallback.
 type WebhookPayload struct {
-	BookID string `json:"book_id"`
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	Author string `json:"author"`
+	Event   string         `json:"event"`
+	BookID  string         `json:"book_id"`
+	ID      string         `json:"id"`
+	Title   string         `json:"title"`
+	Author  string         `json:"author"`
+	Authors []string       `json:"authors"`
+	Data    *bookFields    `json:"data"`
+	Book    *bookFields    `json:"book"`
+}
+
+type bookFields struct {
+	BookID  string   `json:"book_id"`
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Author  string   `json:"author"`
+	Authors []string `json:"authors"`
+}
+
+// resolve folds the various accepted shapes into a single (id, title, author)
+// tuple. The nested envelope wins over flat top-level fields.
+func (p *WebhookPayload) resolve() (id, title, author string) {
+	id = firstNonEmpty(p.BookID, p.ID)
+	title = p.Title
+	author = p.Author
+	if author == "" && len(p.Authors) > 0 {
+		author = p.Authors[0]
+	}
+	for _, nested := range []*bookFields{p.Data, p.Book} {
+		if nested == nil {
+			continue
+		}
+		if v := firstNonEmpty(nested.BookID, nested.ID); v != "" {
+			id = v
+		}
+		if nested.Title != "" {
+			title = nested.Title
+		}
+		if nested.Author != "" {
+			author = nested.Author
+		} else if len(nested.Authors) > 0 {
+			author = nested.Authors[0]
+		}
+	}
+	return id, title, author
 }
 
 func (d *Daemon) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -188,15 +233,15 @@ func (d *Daemon) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	id := firstNonEmpty(p.BookID, p.ID)
-	if id == "" && p.Title == "" {
-		log.Printf("[webhook] reject 400: payload missing book_id and title (got %+v)", p)
-		http.Error(w, "need book_id or title", http.StatusBadRequest)
+	id, title, author := p.resolve()
+	if id == "" && title == "" {
+		log.Printf("[webhook] reject 400: payload missing id and title (event=%q)", p.Event)
+		http.Error(w, "need id or title (top-level, in data, or in book)", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("[webhook] accept: id=%q title=%q author=%q", id, p.Title, p.Author)
-	instr := webhookInstruction(id, p.Title, p.Author)
+	log.Printf("[webhook] accept: event=%q id=%q title=%q author=%q", p.Event, id, title, author)
+	instr := webhookInstruction(id, title, author)
 	d.enqueue(job{source: "webhook", instr: instr})
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintln(w, "queued")
