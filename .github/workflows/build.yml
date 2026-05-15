@@ -44,7 +44,9 @@ jobs:
         run: |
           mkdir -p dist
           out=dist/librarian-${{ matrix.goos }}-${{ matrix.goarch }}
-          go build -trimpath -ldflags="-s -w" -o "$out" ./cmd/librarian
+          version="${GITHUB_REF_NAME}"
+          [[ "$GITHUB_REF" == refs/tags/* ]] || version="${version}-$(git rev-parse --short HEAD)"
+          go build -trimpath -ldflags="-s -w -X main.version=${version}" -o "$out" ./cmd/librarian
           ls -la dist
 
       - name: Upload artifact

@@ -14,7 +14,11 @@ import (
 	"github.com/banux/librarian-agent/internal/daemon"
 	"github.com/banux/librarian-agent/internal/llm"
 	"github.com/banux/librarian-agent/internal/mcp"
+	"github.com/banux/librarian-agent/internal/updater"
 )
+
+// version is injected at build time via -ldflags "-X main.version=v0.2".
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -27,6 +31,10 @@ func main() {
 		runOnce(args)
 	case "serve":
 		serve(args)
+	case "update":
+		update(args)
+	case "version", "--version", "-v":
+		fmt.Println(version)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -37,11 +45,13 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `librarian — agent autonome OPDS
+	fmt.Fprintf(os.Stderr, `librarian %s — agent autonome OPDS
 
 Sous-commandes :
-  run    [flags] [prompt...]   Lance l'agent une fois (mode CLI)
-  serve  [flags]               Lance le daemon : ticker + webhook + /trigger
+  run     [flags] [prompt...]   Lance l'agent une fois (mode CLI)
+  serve   [flags]               Lance le daemon : ticker + webhook + /trigger
+  update  [flags]               Télécharge et remplace le binaire avec la dernière release
+  version                       Affiche la version installée
 
 Variables d'env communes :
   OPDS_MCP_URL, OPDS_MCP_TOKEN
@@ -51,7 +61,9 @@ Variables d'env communes :
 Exemples :
   librarian run "Le Chevalier et la Phalène"
   librarian serve --listen :8080 --interval 6h --prompt "..."
-  curl -X POST localhost:8080/trigger -d '{"prompt":"Traite La Boussole..."}'`)
+  librarian update
+  curl -X POST localhost:8080/trigger -d '{"prompt":"Traite La Boussole..."}'
+`, version)
 }
 
 type commonFlags struct {
@@ -125,6 +137,36 @@ func serve(args []string) {
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(1)
+	}
+}
+
+func update(args []string) {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	repo := fs.String("repo", "banux/nxt-opds-librarian", "Dépôt GitHub owner/repo")
+	force := fs.Bool("force", false, "Réinstaller même si déjà à jour")
+	dryRun := fs.Bool("dry-run", false, "Ne télécharge rien, affiche juste la version cible")
+	_ = fs.Parse(args)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	res, err := updater.Update(ctx, updater.Options{
+		Repo:       *repo,
+		CurrentTag: version,
+		Force:      *force,
+		DryRun:     *dryRun,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "update:", err)
+		os.Exit(1)
+	}
+	switch {
+	case *dryRun:
+		fmt.Printf("dry-run: %s → %s (%s)\n", res.FromVersion, res.ToVersion, res.BinaryPath)
+	case res.Updated:
+		fmt.Printf("mis à jour : %s → %s (%s)\n", res.FromVersion, res.ToVersion, res.BinaryPath)
+	default:
+		fmt.Printf("déjà à jour (%s)\n", res.FromVersion)
 	}
 }
 

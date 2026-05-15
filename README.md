@@ -3,11 +3,14 @@
 Agent Go autonome qui reproduit le skill `/librarian` : maintenance et enrichissement
 d'une bibliothèque personnelle via le serveur MCP OPDS.
 
-L'agent peut s'exécuter dans deux modes :
+L'agent peut s'exécuter dans plusieurs modes :
 
 - **`run`** — une exécution one-shot (équivalent du skill original)
 - **`serve`** — daemon qui combine un **ticker périodique** et un **webhook HTTP**
   pour réagir aux nouveaux livres en temps réel
+- **`update`** — télécharge la dernière release GitHub correspondant à la
+  plateforme et remplace le binaire en place
+- **`version`** — affiche la version installée
 
 ## Architecture
 
@@ -43,6 +46,26 @@ Forcer via `--backend ollama|anthropic`.
 ```bash
 go build -o librarian ./cmd/librarian
 ```
+
+## Mode `update` (self-update)
+
+```bash
+# Mise à jour vers la dernière release
+./librarian update
+
+# Voir la version cible sans rien télécharger
+./librarian update --dry-run
+
+# Forcer la réinstallation
+./librarian update --force
+
+# Voir la version courante
+./librarian version
+```
+
+L'updater interroge `api.github.com/repos/banux/nxt-opds-librarian/releases/latest`,
+télécharge l'asset correspondant à `GOOS-GOARCH`, et remplace le binaire courant
+atomiquement (rename direct sur Linux ; backup `.old` en fallback).
 
 ## Mode `run` (one-shot)
 
