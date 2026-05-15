@@ -1,0 +1,8 @@
+/librarian
+*.exe
+*.out
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
