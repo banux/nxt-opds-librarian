@@ -155,17 +155,28 @@ type WebhookPayload struct {
 }
 
 func (d *Daemon) handleWebhook(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[webhook] %s %s from %s ct=%q sig=%t cl=%d",
+		r.Method, r.URL.Path, clientIP(r),
+		r.Header.Get("Content-Type"),
+		r.Header.Get("X-Signature") != "",
+		r.ContentLength)
+
 	if r.Method != http.MethodPost {
+		log.Printf("[webhook] reject 405: method %s", r.Method)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
 	if err != nil {
+		log.Printf("[webhook] reject 400: read body: %v", err)
 		http.Error(w, "read body", http.StatusBadRequest)
 		return
 	}
+	log.Printf("[webhook] body=%s", truncate(string(body), 300))
+
 	if d.cfg.WebhookSecret != "" {
 		if !verifySignature(d.cfg.WebhookSecret, body, r.Header.Get("X-Signature")) {
+			log.Printf("[webhook] reject 401: bad signature (header=%q)", r.Header.Get("X-Signature"))
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
@@ -173,19 +184,32 @@ func (d *Daemon) handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	var p WebhookPayload
 	if err := json.Unmarshal(body, &p); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		log.Printf("[webhook] reject 400: invalid json: %v", err)
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	id := firstNonEmpty(p.BookID, p.ID)
 	if id == "" && p.Title == "" {
+		log.Printf("[webhook] reject 400: payload missing book_id and title (got %+v)", p)
 		http.Error(w, "need book_id or title", http.StatusBadRequest)
 		return
 	}
 
+	log.Printf("[webhook] accept: id=%q title=%q author=%q", id, p.Title, p.Author)
 	instr := webhookInstruction(id, p.Title, p.Author)
 	d.enqueue(job{source: "webhook", instr: instr})
 	w.WriteHeader(http.StatusAccepted)
 	fmt.Fprintln(w, "queued")
+}
+
+func clientIP(r *http.Request) string {
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		if i := strings.Index(v, ","); i >= 0 {
+			return strings.TrimSpace(v[:i])
+		}
+		return strings.TrimSpace(v)
+	}
+	return r.RemoteAddr
 }
 
 // handleTrigger lets an operator force a run. Without a body it triggers the
