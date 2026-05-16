@@ -84,19 +84,42 @@ func (a *Agent) Init(ctx context.Context) error {
 	return nil
 }
 
+// Mode controls which system prompt the agent runs with. Autonomous batch
+// jobs (ticker / webhook / `run` CLI) use ModeBatch — a rigid enrichment
+// workflow that terminates on "FIN". Chat sessions over /chat use
+// ModeChat — a conversational French-speaking librarian that answers
+// open questions and asks confirmation before mutations.
+type Mode int
+
+const (
+	ModeBatch Mode = iota
+	ModeChat
+)
+
 // Run drives the loop with the user instruction until the model stops.
+// Defaults to ModeBatch so existing callers (run, ticker, webhook) keep
+// the autonomous-enrichment behaviour.
 func (a *Agent) Run(ctx context.Context, userInstruction string) error {
-	return a.RunWithHistory(ctx, userInstruction, nil)
+	return a.run(ctx, userInstruction, nil, ModeBatch)
 }
 
-// RunWithHistory drives the loop seeded with prior conversation turns. The
-// chat endpoint uses this so the LLM remembers earlier exchanges within a
-// session.
+// RunWithHistory drives the loop seeded with prior conversation turns and
+// the chat-mode system prompt. The /chat endpoint is the only caller.
 func (a *Agent) RunWithHistory(ctx context.Context, userInstruction string, history []llm.Message) error {
+	return a.run(ctx, userInstruction, history, ModeChat)
+}
+
+func (a *Agent) run(ctx context.Context, userInstruction string, history []llm.Message, mode Mode) error {
 	a.transcript = append([]llm.Message{}, history...)
 	a.transcript = append(a.transcript, llm.Message{Role: llm.RoleUser, Text: userInstruction})
 	emit := a.emit
-	system := renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
+	var system string
+	switch mode {
+	case ModeChat:
+		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
+	default:
+		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
+	}
 
 	for step := 0; step < a.MaxSteps; step++ {
 		resp, err := a.LLM.Chat(ctx, system, a.transcript, a.tools)
