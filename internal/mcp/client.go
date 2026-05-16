@@ -68,6 +68,28 @@ func New(endpoint, bearerToken string) *Client {
 	}
 }
 
+// bearerOverrideKey carries an alternative bearer token in a Context. The
+// chat handler injects the connected user's OPDS token here so per-user
+// MCP tools (list_to_read, list_wishlist, list_recommendations, etc.)
+// scope to the right account instead of the librarian's admin credential.
+type bearerOverrideKey struct{}
+
+// WithBearer returns a Context that overrides the Client's static bearer
+// for the duration of any MCP call made with it. Empty token = no override.
+func WithBearer(ctx context.Context, token string) context.Context {
+	if token == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, bearerOverrideKey{}, token)
+}
+
+func bearerFromCtx(ctx context.Context) string {
+	if v, ok := ctx.Value(bearerOverrideKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 func (c *Client) Initialize(ctx context.Context) error {
 	params := map[string]any{
 		"protocolVersion": protocolVersion,
@@ -206,8 +228,12 @@ func (c *Client) send(ctx context.Context, req rpcRequest) (*rpcResponse, error)
 func (c *Client) applyHeaders(r *http.Request) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Accept", "application/json, text/event-stream")
-	if c.bearerToken != "" {
-		r.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	token := bearerFromCtx(r.Context())
+	if token == "" {
+		token = c.bearerToken
+	}
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	if c.sessionID != "" {
 		r.Header.Set("Mcp-Session-Id", c.sessionID)

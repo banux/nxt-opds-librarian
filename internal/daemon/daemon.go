@@ -22,6 +22,7 @@ import (
 	"github.com/banux/librarian-agent/internal/agent"
 	"github.com/banux/librarian-agent/internal/instances"
 	"github.com/banux/librarian-agent/internal/llm"
+	"github.com/banux/librarian-agent/internal/mcp"
 )
 
 type Config struct {
@@ -342,7 +343,12 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Message string `json:"message"`
-		History []struct {
+		// UserToken (optional) is the connected user's per-account OPDS/MCP
+		// token. When set, MCP tool calls in this chat scope to that user
+		// (their to_read list, wishlist, recommendations, unread, …) instead
+		// of falling back to the librarian's admin credential.
+		UserToken string `json:"user_token"`
+		History   []struct {
 			Role    string `json:"role"`
 			Content string `json:"content"`
 		} `json:"history"`
@@ -364,6 +370,11 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		history = append(history, llm.Message{Role: role, Text: m.Content})
 	}
+
+	// Scope MCP tool calls to the connected user when the relay forwarded
+	// their token. The bearer override flows through r.Context() into every
+	// MCP request issued by the agent loop.
+	ctx := mcp.WithBearer(r.Context(), req.UserToken)
 
 	entry.Lock.Lock()
 	defer entry.Lock.Unlock()
@@ -388,7 +399,7 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { entry.Agent.Emit = prevEmit }()
 
-	if err := entry.Agent.RunWithHistory(r.Context(), req.Message, history); err != nil {
+	if err := entry.Agent.RunWithHistory(ctx, req.Message, history); err != nil {
 		log.Printf("[chat %s] agent error: %v", entry.Cfg.Name, err)
 		if runError == "" {
 			runError = err.Error()
