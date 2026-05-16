@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -25,7 +26,12 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	rawArgs := stripBinaryNameRepeat(os.Args[1:])
+	if len(rawArgs) == 0 {
+		usage()
+		os.Exit(2)
+	}
+	cmd, args := rawArgs[0], rawArgs[1:]
 	switch cmd {
 	case "run":
 		runOnce(args)
@@ -42,9 +48,14 @@ func main() {
 	case "-h", "--help", "help":
 		usage()
 	default:
+		if looksLikeSubcommandTypo(cmd) {
+			fmt.Fprintf(os.Stderr, "librarian: sous-commande inconnue %q. Sous-commandes valides : run, serve, pair, unpair, update, version, help.\n", cmd)
+			fmt.Fprintln(os.Stderr, "Astuce : pour passer un prompt one-shot, utilise `run --prompt \"...\"` (et non un mot isolé).")
+			os.Exit(2)
+		}
 		// Pas de sous-commande explicite → mode "run" pour compat,
 		// où tout est traité comme un prompt one-shot.
-		runOnce(os.Args[1:])
+		runOnce(rawArgs)
 	}
 }
 
@@ -288,6 +299,43 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// stripBinaryNameRepeat drops a leading argument that matches the binary's
+// own name. Operators frequently type `./librarian-linux-amd64 librarian run …`
+// — the duplicated "librarian" used to silently fall through to the
+// one-shot prompt mode and wrap the rest as a book title to search for.
+// We accept variants like "librarian", "librarian-linux-amd64", or the basename
+// of os.Args[0].
+func stripBinaryNameRepeat(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	first := args[0]
+	own := filepath.Base(os.Args[0])
+	if first == "librarian" || first == own || strings.HasPrefix(first, "librarian-") {
+		return args[1:]
+	}
+	return args
+}
+
+// looksLikeSubcommandTypo reports whether the first arg appears to be an
+// attempted subcommand (alphabetic word, no flag prefix) rather than free
+// prompt text. Used to surface a clear error instead of treating typos as
+// prompts.
+func looksLikeSubcommandTypo(s string) bool {
+	if s == "" || strings.HasPrefix(s, "-") {
+		return false
+	}
+	if strings.ContainsAny(s, " \t") {
+		return false // multi-word string → real prompt
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func pickStr(flag, yaml, def string) string {
