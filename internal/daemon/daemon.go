@@ -144,14 +144,44 @@ func (d *Daemon) worker(ctx context.Context, name string) {
 		log.Printf("[%s job %s] start: %s", name, j.Source, truncate(j.Instr, 120))
 		start := time.Now()
 		runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+
+		// Tee the agent loop into the daemon log so batch/webhook runs
+		// surface the same tool_call / tool_result trace that /chat does.
 		entry.Lock.Lock()
+		toolCount := 0
+		prevEmit := entry.Agent.Emit
+		entry.Agent.Emit = func(e agent.Event) {
+			switch e.Kind {
+			case "tool_call":
+				toolCount++
+				log.Printf("[%s job %s] tool_call %s %s",
+					name, j.Source, e.Name, summarizeArgs(e.Arguments))
+			case "tool_result":
+				status := "ok"
+				if e.IsError {
+					status = "err"
+				}
+				log.Printf("[%s job %s] tool_result %s [%s] %s",
+					name, j.Source, e.Name, status, truncate(strings.TrimSpace(e.Result), 200))
+			case "text":
+				if e.Delta != "" {
+					log.Printf("[%s job %s] text: %s",
+						name, j.Source, truncate(strings.TrimSpace(e.Delta), 200))
+				}
+			case "error":
+				log.Printf("[%s job %s] event error: %s", name, j.Source, e.Message)
+			}
+		}
 		err := entry.Agent.Run(runCtx, j.Instr)
+		entry.Agent.Emit = prevEmit
 		entry.Lock.Unlock()
 		cancel()
 		if err != nil {
-			log.Printf("[%s job %s] error after %s: %v", name, j.Source, time.Since(start), err)
+			log.Printf("[%s job %s] error after %s (tools=%d): %v",
+				name, j.Source, time.Since(start).Round(time.Millisecond), toolCount, err)
 		} else {
-			log.Printf("[%s job %s] done in %s", name, j.Source, time.Since(start))
+			log.Printf("[%s job %s] done in %s (tools=%d)",
+				name, j.Source, time.Since(start).Round(time.Millisecond), toolCount)
 		}
 	}
 }
