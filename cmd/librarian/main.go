@@ -149,6 +149,12 @@ func serve(args []string) {
 		BatchLimit:  pickInt(*batchLimit, cfg.BatchLimit, 10),
 		BatchPrompt: *prompt,
 	}
+	// Compute the public URL once, using the actual listen we ended up with
+	// so the derivation reflects any --listen override on the CLI.
+	dcfg.PublicURL = config.ResolveLibrarianURL("", config.Config{
+		PublicURL: cfg.PublicURL,
+		Listen:    dcfg.Listen,
+	})
 
 	d := daemon.New(dcfg, registry)
 	if err := d.Run(ctx); err != nil {

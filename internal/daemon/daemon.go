@@ -31,6 +31,10 @@ type Config struct {
 	// BatchPrompt overrides the default maintenance instruction sent both on
 	// tick and on POST /trigger with an empty body. Empty = use the default.
 	BatchPrompt string
+	// PublicURL is the librarian's base URL announced to every paired
+	// nxt-opds at startup so the catalog can rewrite its stored
+	// librarian_url after a host/port change without re-pairing.
+	PublicURL string
 }
 
 type Daemon struct {
@@ -89,6 +93,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	log.Printf("daemon listening on %s (interval %s, %d instances)", d.cfg.Listen, d.cfg.Interval, len(d.registry.Names()))
+	d.announceAll(ctx)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

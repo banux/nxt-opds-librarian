@@ -6,6 +6,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -251,6 +253,49 @@ func (c *Config) Find(name string) (Instance, bool) {
 		}
 	}
 	return Instance{}, false
+}
+
+// ResolveLibrarianURL picks the URL nxt-opds should POST to (chat + webhooks).
+// Priority:
+//  1. explicit override (e.g. --librarian-url flag)
+//  2. cfg.PublicURL (yaml: public_url)
+//  3. derived from cfg.Listen (":9090" → http://localhost:9090,
+//     "0.0.0.0:N" → http://localhost:N, "host:N" → http://host:N)
+//
+// Returns "" when nothing produces a usable URL (e.g. Listen empty too).
+func ResolveLibrarianURL(override string, cfg Config) string {
+	if override != "" {
+		return strings.TrimRight(override, "/")
+	}
+	if cfg.PublicURL != "" {
+		return strings.TrimRight(cfg.PublicURL, "/")
+	}
+	if cfg.Listen == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(cfg.Listen)
+	if err != nil {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("http://%s:%s", host, port)
+}
+
+// NxtOPDSBaseURL derives the nxt-opds base URL (e.g. "https://books.jerinn.com")
+// from an MCP endpoint (e.g. "https://books.jerinn.com/mcp"). Used by the
+// daemon's announce flow so the librarian can call nxt-opds without storing
+// the base URL separately. Returns "" if the MCP URL is malformed.
+func NxtOPDSBaseURL(mcpURL string) string {
+	u, err := url.Parse(mcpURL)
+	if err != nil {
+		return ""
+	}
+	u.Path = strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/mcp")
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/")
 }
 
 // Strings used by callers to format helpful errors with the expected layout.

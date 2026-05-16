@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -64,7 +63,7 @@ func runPair(args []string) {
 	}
 
 	cfg := loadOrInit(path)
-	resolvedURL := resolveLibrarianURL(*librarianURL, cfg)
+	resolvedURL := config.ResolveLibrarianURL(*librarianURL, cfg)
 	if resolvedURL == "" {
 		fmt.Fprintln(os.Stderr, "pair: impossible de déterminer --librarian-url. Préciser le flag ou ajouter `public_url:` dans le YAML.")
 		os.Exit(2)
@@ -306,30 +305,6 @@ func pickLabel(flagLabel, respLabel string) string {
 		return flagLabel
 	}
 	return respLabel
-}
-
-// resolveLibrarianURL picks the URL nxt-opds will POST to. Priority:
-//  1. --librarian-url flag
-//  2. cfg.PublicURL from the YAML
-//  3. derive http://localhost:<port> from cfg.Listen (e.g. ":9090")
-func resolveLibrarianURL(flagURL string, cfg config.Config) string {
-	if flagURL != "" {
-		return strings.TrimRight(flagURL, "/")
-	}
-	if cfg.PublicURL != "" {
-		return strings.TrimRight(cfg.PublicURL, "/")
-	}
-	if cfg.Listen != "" {
-		host, port, err := net.SplitHostPort(cfg.Listen)
-		if err != nil {
-			return ""
-		}
-		if host == "" || host == "0.0.0.0" || host == "::" {
-			host = "localhost"
-		}
-		return fmt.Sprintf("http://%s:%s", host, port)
-	}
-	return ""
 }
 
 func warnLocalhost(u string) {

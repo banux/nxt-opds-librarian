@@ -108,6 +108,22 @@ func TestUpsertRotatesSecrets(t *testing.T) {
 	}
 }
 
+func TestNxtOPDSBaseURL(t *testing.T) {
+	cases := map[string]string{
+		"https://books.jerinn.com/mcp":     "https://books.jerinn.com",
+		"https://books.jerinn.com/mcp/":    "https://books.jerinn.com",
+		"http://localhost:8080/mcp":        "http://localhost:8080",
+		"http://localhost:8080/mcp?token=x": "http://localhost:8080",
+		"http://localhost:8080/":           "http://localhost:8080",
+		"":                                 "",
+	}
+	for in, want := range cases {
+		if got := NxtOPDSBaseURL(in); got != want {
+			t.Errorf("NxtOPDSBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestRemove(t *testing.T) {
 	cfg := Config{
 		Instances: []Instance{

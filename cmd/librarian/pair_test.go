@@ -25,7 +25,7 @@ func TestResolveLibrarianURL(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{Listen: tc.listen, PublicURL: tc.public}
-			if got := resolveLibrarianURL(tc.flag, cfg); got != tc.want {
+			if got := config.ResolveLibrarianURL(tc.flag, cfg); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
