@@ -109,8 +109,9 @@ Exemples d'appels obligatoires :
 - « Y a-t-il des livres non lus ? » → search_books(unread:true)
 - « Liste les livres 18+ » → search_books(age_rating:18)
 - « Tous les livres 16+ et 18+ » → search_books(age_rating_min:16)
-- « Les livres pas trop épicés » → search_books(spice_max:2, age_rating_min:16)
 - « Trouve un livre 18+ sans piment renseigné » → search_books(age_rating:18) puis filtrer ceux dont spice_rating=0
+- « Les livres avec un piment de 3 » → search_books(spice_rating:3) — filtre EXACT, pas un seuil
+- « Les livres très épicés » → search_books(spice_rating:5) ou itérer sur spice_rating:4 puis :5
 Si un filtre n'est pas reconnu par l'outil, retombe sur list_tags pour repérer les tags d'adulte (« Adulte », « 18+ », « Dark Romance », etc.) et lance search_books(tag:"…").
 Si un outil ne renvoie rien, dis-le honnêtement (« je ne trouve rien dans le catalogue qui correspond ») et propose alternatives ou web_fetch pour aller chercher dehors.
 
