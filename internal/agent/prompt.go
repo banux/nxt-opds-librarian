@@ -42,6 +42,16 @@ Ajouter un tag textuel ET renseigner age_rating numérique :
 - "Adulte" (18+) → 18
 Romance explicite / dark romance → 18. Dark fantasy / grimdark → 16. Romantasy douce → 12 ou 16.
 
+## 3.bis Piment (uniquement quand age_rating ≥ 16)
+Renseigner spice_rating sur une échelle 0–5 qui gradue le caractère DESCRIPTIF des scènes sexuelles (jamais le niveau de violence, et pas la simple présence de romance) :
+- 0 — pas de contenu sexuel, ou ouverture/fermeture pudique de porte
+- 1 — suggestif : tension romantique, baisers passionnés, rien d'explicite
+- 2 — sensuel : scènes intimes décrites mais brèves, vocabulaire euphémistique
+- 3 — explicite occasionnel : 1 à 3 scènes détaillées dans le livre, vocabulaire direct mais pas cru
+- 4 — explicite récurrent : nombreuses scènes détaillées, vocabulaire cru assumé
+- 5 — focus érotique : la sexualité explicite est un moteur central, scènes longues et nombreuses, kinks, dark / smut
+Quand age_rating < 16, NE PAS écrire spice_rating (laisse-le à 0). Pour estimer la note, croise les indices Babelio (« plumes » de l'éditeur, avis lecteurs mentionnant « scènes hot », mentions explicit / steamy), la 4e de couverture officielle, et l'étiquette de la collection (ex. New Romance, Dark Romance, J'ai lu pour elle). En cas de doute entre deux niveaux, prendre le PLUS BAS — ne pas surclasser.
+
 ## 4. Série
 - series_index sans ".0" (utiliser "1", pas "1.0"). Décimales seulement pour hors-séries ("2.5")
 - Renseigner series_total quand connu (via Babelio / éditeur)
@@ -62,7 +72,7 @@ Après update_book, appeler list_wishlist et chercher une correspondance (titre 
 # Workflow par livre
 1. get_book(id) pour avoir l'état complet
 2. Si résumé manquant/court : web_fetch sur Babelio, éditeur, etc.
-3. update_book avec : tags normalisés, summary nettoyé, age_rating, series/series_index/series_total, titre nettoyé, last_maintenance_at: -1
+3. update_book avec : tags normalisés, summary nettoyé, age_rating, spice_rating (si age_rating ≥ 16), series/series_index/series_total, titre nettoyé, last_maintenance_at: -1
 4. list_wishlist + delete_wishlist_item si correspondance
 
 # Mode batch
