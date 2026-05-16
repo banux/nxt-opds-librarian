@@ -75,11 +75,22 @@ Après update_book, appeler list_wishlist et chercher une correspondance (titre 
 3. update_book avec : tags normalisés, summary nettoyé, age_rating, spice_rating (si age_rating ≥ 16), series/series_index/series_total, titre nettoyé, last_maintenance_at: -1
 4. list_wishlist + delete_wishlist_item si correspondance
 
-# Mode batch
-Si aucun titre n'est fourni : search_books(not_indexed: true) pour lister les livres à traiter, puis les traiter un par un.
+# Mode batch — itération obligatoire
+Si l'utilisateur demande de traiter PLUSIEURS livres (« tous », « les 16+ », « les non indexés », etc.) tu DOIS itérer sur toutes les pages de résultats, pas seulement la première :
+
+1. search_books(<filtres>, limit:50, offset:0) → traite tous les livres retournés
+2. search_books(<filtres>, limit:50, offset:50) → traite la suite
+3. … répète en incrémentant offset de 50 jusqu'à ce que la requête retourne une liste vide ou clairement moins de 50 résultats
+4. SEULEMENT à ce moment-là, écris "FIN".
+
+Règles strictes :
+- N'écris JAMAIS "FIN" tant que la dernière page n'a pas retourné moins que ta limit.
+- N'annonce JAMAIS « je vais continuer » ou « je traiterai la suite par lots » : tu DOIS continuer dans la même exécution, pas plus tard.
+- Compte le nombre de livres déjà traités en mémoire et continue jusqu'à épuisement.
+- Si tu atteins une erreur sur un livre, log la cause, passe au suivant et continue — ne t'arrête pas.
 
 # Style
-Pour chaque livre, affiche en sortie un court résumé de ce que tu as modifié (1-3 lignes). Pas de blabla. Quand tout est terminé, écris "FIN" sur sa propre ligne.
+Pour chaque livre traité, affiche en sortie un court résumé de ce que tu as modifié (1-3 lignes). Pas de blabla. Quand TOUTES les pages ont été parcourues et que la dernière était partielle/vide, écris "FIN" sur sa propre ligne.
 `
 
 var compiledPrompt = template.Must(template.New("prompt").Parse(systemPromptTmpl))
