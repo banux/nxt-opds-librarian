@@ -69,8 +69,11 @@ Variables d'env :
 Exemples :
   librarian pair --nxt-opds https://books.jerinn.com --code K4Q9-PN2X \
                  --name jerinn --label "Bibliothèque Jerinn"
-  librarian run --instance jerinn "Le Chevalier et la Phalène"
-  librarian serve --listen :8080 --interval 6h
+  librarian run --instance jerinn "Le Chevalier et la Phalène"     # un livre par titre
+  librarian run --instance jerinn --prompt "Traite TOUS les livres non indexés un par un, sans limite. Termine par FIN." \
+                --max-steps 1000                                    # maintenance totale
+  librarian serve --listen :8080 --interval 6h \
+                  --max-steps 500 --job-timeout 2h                 # daemon longue durée
   librarian update
 `, version)
 }
@@ -98,8 +101,8 @@ func registerCommon(fs *flag.FlagSet) *commonFlags {
 func runOnce(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	c := registerCommon(fs)
-	maxSteps := fs.Int("max-steps", 60, "Nombre maximum d'étapes")
-	prompt := fs.String("prompt", "", "Prompt complet (sinon construit depuis les arguments positionnels)")
+	maxSteps := fs.Int("max-steps", 200, "Nombre maximum d'étapes (chaque livre = 5-10 étapes)")
+	prompt := fs.String("prompt", "", "Prompt complet à exécuter verbatim (sans wrap titre). Préférer cette forme pour les maintenances longues, ex: --prompt \"search_books(not_indexed:true, limit:50) puis traite chaque livre selon le workflow complet. Termine par FIN.\"")
 	_ = fs.Parse(args)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -130,8 +133,9 @@ func serve(args []string) {
 	listen := fs.String("listen", "", "Adresse d'écoute HTTP (override le YAML)")
 	interval := fs.Duration("interval", 0, "Période entre deux maintenances (override le YAML)")
 	batchLimit := fs.Int("batch-limit", 0, "Nombre de livres traités par tick (override le YAML)")
-	prompt := fs.String("prompt", "", "Prompt remplaçant la maintenance batch par défaut")
-	maxSteps := fs.Int("max-steps", 0, "Nombre maximum d'étapes par job (override le YAML)")
+	prompt := fs.String("prompt", "", "Prompt verbatim remplaçant la maintenance batch par défaut. Utilisable pour une maintenance totale longue, ex: --prompt \"Traite TOUS les livres non indexés un par un, sans limite. Termine par FIN.\"")
+	maxSteps := fs.Int("max-steps", 0, "Nombre maximum d'étapes par job (override le YAML, défaut 200 — chaque livre coûte 5-10 étapes)")
+	jobTimeout := fs.Duration("job-timeout", 0, "Timeout par job (override le YAML, défaut 1h). Augmenter pour de la maintenance totale sur grosse bibliothèque.")
 	_ = fs.Parse(args)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -139,15 +143,19 @@ func serve(args []string) {
 
 	maxS := *maxSteps
 	if maxS == 0 {
-		maxS = 60
+		maxS = 200
 	}
 	cfg, registry := loadConfigAndRegistry(c, maxS, !*c.quiet)
+	if *maxSteps == 0 && cfg.MaxSteps > 0 {
+		maxS = cfg.MaxSteps
+	}
 
 	dcfg := daemon.Config{
 		Listen:      pickStr(*listen, cfg.Listen, ":8080"),
 		Interval:    pickDur(*interval, cfg.Interval, 6*time.Hour),
 		BatchLimit:  pickInt(*batchLimit, cfg.BatchLimit, 10),
 		BatchPrompt: *prompt,
+		JobTimeout:  pickDur(*jobTimeout, 0, time.Hour),
 	}
 	// Compute the public URL once, using the actual listen we ended up with
 	// so the derivation reflects any --listen override on the CLI.

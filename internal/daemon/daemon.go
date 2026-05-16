@@ -36,6 +36,11 @@ type Config struct {
 	// nxt-opds at startup so the catalog can rewrite its stored
 	// librarian_url after a host/port change without re-pairing.
 	PublicURL string
+	// JobTimeout caps how long any single batch / webhook / trigger job
+	// can run. Large prompts ("traite tous les non-indexés") need much
+	// more than the 15 min the worker used to allow. Defaults to 1 h
+	// when zero.
+	JobTimeout time.Duration
 }
 
 type Daemon struct {
@@ -143,7 +148,11 @@ func (d *Daemon) worker(ctx context.Context, name string) {
 	for j := range entry.Jobs {
 		log.Printf("[%s job %s] start: %s", name, j.Source, truncate(j.Instr, 120))
 		start := time.Now()
-		runCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		timeout := d.cfg.JobTimeout
+		if timeout <= 0 {
+			timeout = time.Hour
+		}
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
 
 		// Tee the agent loop into the daemon log so batch/webhook runs
 		// surface the same tool_call / tool_result trace that /chat does.

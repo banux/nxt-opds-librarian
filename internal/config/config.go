@@ -58,7 +58,7 @@ func Default() Config {
 		IntervalRaw: "6h",
 		Interval:    6 * time.Hour,
 		BatchLimit:  10,
-		MaxSteps:    60,
+		MaxSteps:    200,
 		Backend:     "auto",
 		OllamaURL:   "http://localhost:11434",
 	}
