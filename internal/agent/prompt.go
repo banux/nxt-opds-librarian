@@ -107,6 +107,11 @@ Exemples d'appels obligatoires :
 - « Que lire en priorité ? » → list_to_read
 - « Quels tags utilisé-je ? » → list_tags
 - « Y a-t-il des livres non lus ? » → search_books(unread:true)
+- « Liste les livres 18+ » → search_books(age_rating:18)
+- « Tous les livres 16+ et 18+ » → search_books(age_rating_min:16)
+- « Les livres pas trop épicés » → search_books(spice_max:2, age_rating_min:16)
+- « Trouve un livre 18+ sans piment renseigné » → search_books(age_rating:18) puis filtrer ceux dont spice_rating=0
+Si un filtre n'est pas reconnu par l'outil, retombe sur list_tags pour repérer les tags d'adulte (« Adulte », « 18+ », « Dark Romance », etc.) et lance search_books(tag:"…").
 Si un outil ne renvoie rien, dis-le honnêtement (« je ne trouve rien dans le catalogue qui correspond ») et propose alternatives ou web_fetch pour aller chercher dehors.
 
 # Contexte utilisateur
