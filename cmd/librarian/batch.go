@@ -76,19 +76,20 @@ func runBatch(args []string) {
 		}
 
 		stop := false
-		for _, id := range ids {
+		for i, id := range ids {
 			if *maxBooks > 0 && processed >= *maxBooks {
 				log.Printf("[batch %s] plafond --max-books=%d atteint, arrêt", name, *maxBooks)
 				stop = true
 				break
 			}
+			pos := offset + i + 1 // 1-based absolute index in the catalog
 			if *dryRun {
 				fmt.Println(id)
 				processed++
 				continue
 			}
 			instr := strings.ReplaceAll(perBookTemplate, "{{ID}}", id)
-			log.Printf("[batch %s] ▶ %d/%d id=%s", name, processed+1, total, id)
+			log.Printf("[batch %s] ▶ %d/%d id=%s", name, pos, total, id)
 			err := runOneBookWithRetry(ctx, entry, name, id, instr, *retryWait, *maxRetries)
 			if err != nil {
 				failed++
