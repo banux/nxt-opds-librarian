@@ -94,6 +94,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	log.Printf("daemon listening on %s (interval %s, %d instances)", d.cfg.Listen, d.cfg.Interval, len(d.registry.Names()))
 	d.announceAll(ctx)
+	d.startHeartbeats(ctx)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
