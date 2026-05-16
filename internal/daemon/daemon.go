@@ -366,7 +366,20 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	send := func(kind string, data any) {
+	// SSE wire format:
+	//   - text frames are emitted as raw text (one data: line per LF) so the
+	//     Vue chat box can render them verbatim without JSON.parse.
+	//   - structured frames (tool_call / tool_result / done / error) stay JSON
+	//     because they carry typed fields the renderer wants to introspect.
+	sendText := func(s string) {
+		_, _ = fmt.Fprint(w, "event: text\n")
+		for _, line := range strings.Split(s, "\n") {
+			_, _ = fmt.Fprintf(w, "data: %s\n", line)
+		}
+		_, _ = fmt.Fprint(w, "\n")
+		flusher.Flush()
+	}
+	sendEvent := func(kind string, data any) {
 		b, _ := json.Marshal(data)
 		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, string(b))
 		flusher.Flush()
@@ -388,15 +401,15 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 	entry.Agent.Emit = func(e agent.Event) {
 		switch e.Kind {
 		case "tool_call":
-			send("tool_call", map[string]any{"name": e.Name, "arguments": e.Arguments})
+			sendEvent("tool_call", map[string]any{"name": e.Name, "arguments": e.Arguments})
 		case "tool_result":
-			send("tool_result", map[string]any{"name": e.Name, "ok": !e.IsError, "text": e.Result})
+			sendEvent("tool_result", map[string]any{"name": e.Name, "ok": !e.IsError, "text": e.Result})
 		case "text":
-			send("text", map[string]any{"delta": e.Delta})
+			sendText(e.Delta)
 		case "done":
-			send("done", map[string]any{"stop": e.StopReason, "steps": e.Steps})
+			sendEvent("done", map[string]any{"stop": e.StopReason, "steps": e.Steps})
 		case "error":
-			send("error", map[string]any{"message": e.Message})
+			sendEvent("error", map[string]any{"message": e.Message})
 		}
 	}
 	defer func() { entry.Agent.Emit = prevEmit }()
