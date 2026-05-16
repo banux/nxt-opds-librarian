@@ -328,8 +328,10 @@ func (d *Daemon) handleForget(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintln(w, "acknowledged")
 }
 
-// handleChat serves POST /chat as a Server-Sent Events stream. Each step of
-// the agent loop emits a frame: tool_call, tool_result, text, done, or error.
+// handleChat serves POST /chat as a single JSON response. The agent runs the
+// tool-calling loop to completion and the handler returns the concatenated
+// assistant text. Tool details and intermediate reasoning are not part of
+// the response — only the final answer the model produced for the user.
 func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 	secret := bearerToken(r.Header.Get("Authorization"))
 	entry, ok := d.registry.GetByChatSecret(r.Context(), secret)
@@ -354,37 +356,6 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	// SSE wire format:
-	//   - text frames are emitted as raw text (one data: line per LF) so the
-	//     Vue chat box can render them verbatim without JSON.parse.
-	//   - structured frames (tool_call / tool_result / done / error) stay JSON
-	//     because they carry typed fields the renderer wants to introspect.
-	sendText := func(s string) {
-		_, _ = fmt.Fprint(w, "event: text\n")
-		for _, line := range strings.Split(s, "\n") {
-			_, _ = fmt.Fprintf(w, "data: %s\n", line)
-		}
-		_, _ = fmt.Fprint(w, "\n")
-		flusher.Flush()
-	}
-	sendEvent := func(kind string, data any) {
-		b, _ := json.Marshal(data)
-		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", kind, string(b))
-		flusher.Flush()
-	}
-
 	history := make([]llm.Message, 0, len(req.History))
 	for _, m := range req.History {
 		role := llm.RoleUser
@@ -397,26 +368,40 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 	entry.Lock.Lock()
 	defer entry.Lock.Unlock()
 
+	// Collect every text fragment the model produces. Tool calls are still
+	// executed by the loop but discarded for the response — the user only
+	// wants the final answer.
+	var (
+		texts    []string
+		runError string
+	)
 	prevEmit := entry.Agent.Emit
 	entry.Agent.Emit = func(e agent.Event) {
 		switch e.Kind {
-		case "tool_call":
-			sendEvent("tool_call", map[string]any{"name": e.Name, "arguments": e.Arguments})
-		case "tool_result":
-			sendEvent("tool_result", map[string]any{"name": e.Name, "ok": !e.IsError, "text": e.Result})
 		case "text":
-			sendText(e.Delta)
-		case "done":
-			sendEvent("done", map[string]any{"stop": e.StopReason, "steps": e.Steps})
+			if e.Delta != "" {
+				texts = append(texts, e.Delta)
+			}
 		case "error":
-			sendEvent("error", map[string]any{"message": e.Message})
+			runError = e.Message
 		}
 	}
 	defer func() { entry.Agent.Emit = prevEmit }()
 
 	if err := entry.Agent.RunWithHistory(r.Context(), req.Message, history); err != nil {
 		log.Printf("[chat %s] agent error: %v", entry.Cfg.Name, err)
+		if runError == "" {
+			runError = err.Error()
+		}
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	resp := map[string]any{"reply": strings.TrimSpace(strings.Join(texts, "\n"))}
+	if runError != "" {
+		resp["error"] = runError
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // --- helpers ----------------------------------------------------------------
