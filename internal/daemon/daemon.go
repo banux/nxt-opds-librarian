@@ -376,16 +376,27 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 	// MCP request issued by the agent loop.
 	ctx := mcp.WithBearer(r.Context(), req.UserToken)
 
+	name := entry.Cfg.Name
+	scope := "instance"
+	if req.UserToken != "" {
+		scope = "user"
+	}
+	log.Printf("[chat %s] ◀ %s (scope=%s, history=%d): %s",
+		name, clientIP(r), scope, len(history), truncate(req.Message, 200))
+
 	entry.Lock.Lock()
 	defer entry.Lock.Unlock()
 
 	// Collect every text fragment the model produces. Tool calls are still
 	// executed by the loop but discarded for the response — the user only
-	// wants the final answer.
+	// wants the final answer. The Emit hook also tees structured events to
+	// the daemon log so operators can follow what the agent is doing.
 	var (
-		texts    []string
-		runError string
+		texts     []string
+		runError  string
+		toolCount int
 	)
+	start := time.Now()
 	prevEmit := entry.Agent.Emit
 	entry.Agent.Emit = func(e agent.Event) {
 		switch e.Kind {
@@ -393,18 +404,37 @@ func (d *Daemon) handleChat(w http.ResponseWriter, r *http.Request) {
 			if e.Delta != "" {
 				texts = append(texts, e.Delta)
 			}
+		case "tool_call":
+			toolCount++
+			log.Printf("[chat %s] tool_call %s %s", name, e.Name, summarizeArgs(e.Arguments))
+		case "tool_result":
+			status := "ok"
+			if e.IsError {
+				status = "err"
+			}
+			log.Printf("[chat %s] tool_result %s [%s] %s",
+				name, e.Name, status, truncate(strings.TrimSpace(e.Result), 200))
+		case "done":
+			log.Printf("[chat %s] done in %s (steps=%d, tools=%d, stop=%s)",
+				name, time.Since(start).Round(time.Millisecond), e.Steps, toolCount, e.StopReason)
 		case "error":
 			runError = e.Message
+			log.Printf("[chat %s] event error: %s", name, e.Message)
 		}
 	}
 	defer func() { entry.Agent.Emit = prevEmit }()
 
 	if err := entry.Agent.RunWithHistory(ctx, req.Message, history); err != nil {
-		log.Printf("[chat %s] agent error: %v", entry.Cfg.Name, err)
+		log.Printf("[chat %s] agent error after %s: %v",
+			name, time.Since(start).Round(time.Millisecond), err)
 		if runError == "" {
 			runError = err.Error()
 		}
 	}
+
+	reply := strings.TrimSpace(strings.Join(texts, "\n"))
+	log.Printf("[chat %s] ▶ reply (%d chars, tools=%d): %s",
+		name, len(reply), toolCount, truncate(reply, 200))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -470,4 +500,12 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+func summarizeArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return "()"
+	}
+	b, _ := json.Marshal(args)
+	return truncate(string(b), 200)
 }
