@@ -32,6 +32,8 @@ func runBatch(args []string) {
 	tmpl := fs.String("prompt", "", "Prompt par livre. {{ID}} remplacé. Défaut : enrichissement complet.")
 	dryRun := fs.Bool("dry-run", false, "Liste les IDs sans appeler l'agent")
 	filters := newFilterList(fs, "filter", "Filtre passé à search_books, ex: age_rating_min=16 (répétable)")
+	retryWait := fs.Duration("retry-wait", time.Hour, "Pause entre 2 tentatives après une erreur de quota/rate-limit LLM")
+	maxRetries := fs.Int("max-rate-retries", 6, "Nombre max de pauses+retry sur erreur de quota avant abandon du livre (0 = pas de retry)")
 	_ = fs.Parse(args)
 
 	if *limit <= 0 || *limit > 100 {
@@ -87,9 +89,14 @@ func runBatch(args []string) {
 			}
 			instr := strings.ReplaceAll(perBookTemplate, "{{ID}}", id)
 			log.Printf("[batch %s] ▶ %d/%d id=%s", name, processed+1, total, id)
-			if err := runOneBook(ctx, entry, instr); err != nil {
+			err := runOneBookWithRetry(ctx, entry, name, id, instr, *retryWait, *maxRetries)
+			if err != nil {
 				failed++
-				log.Printf("[batch %s] id=%s ERROR: %v", name, id, err)
+				log.Printf("[batch %s] id=%s ABANDON après retries: %v", name, id, err)
+				if ctx.Err() != nil {
+					log.Printf("[batch %s] interrompu — reprendre avec --offset %d", name, offset)
+					return
+				}
 			} else {
 				processed++
 			}
@@ -130,6 +137,82 @@ func runOneBook(ctx context.Context, entry *instances.Entry, instr string) error
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	return entry.Agent.Run(runCtx, instr)
+}
+
+// runOneBookWithRetry wraps runOneBook with rate-limit-aware retries. When
+// the LLM provider returns a quota error (HTTP 429, "rate limit",
+// "overloaded", Anthropic's rate_limit_error/overloaded_error, Ollama
+// Cloud's similar messages), the loop sleeps for retryWait and retries the
+// same book up to maxRetries times. The wait is interruptible — Ctrl-C
+// during a sleep cancels cleanly and returns ctx.Err() so the outer batch
+// loop can log a "reprendre avec --offset N" hint.
+func runOneBookWithRetry(ctx context.Context, entry *instances.Entry, instanceName, id, instr string, retryWait time.Duration, maxRetries int) error {
+	attempt := 0
+	for {
+		err := runOneBook(ctx, entry, instr)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !isRateLimitError(err) {
+			return err
+		}
+		attempt++
+		if attempt > maxRetries {
+			return fmt.Errorf("rate-limit persistant après %d retry: %w", maxRetries, err)
+		}
+		resumeAt := time.Now().Add(retryWait).Format("15:04:05")
+		log.Printf("[batch %s] id=%s rate-limit (%v) — pause %s, reprise vers %s (retry %d/%d)",
+			instanceName, id, truncateErr(err), retryWait, resumeAt, attempt, maxRetries)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryWait):
+		}
+	}
+}
+
+// isRateLimitError heuristically detects quota / throttling failures from
+// the LLM provider. Both backends format their errors as "<provider>
+// <status>: <body>" so we look at the status code and the body keywords.
+// Net failures during a long sleep on the operator's side (laptop suspend,
+// VPN drop) commonly surface as "i/o timeout" or "connection reset" —
+// retry those too since they're usually transient.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "429") ||
+		strings.Contains(msg, "503") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "rate_limit") ||
+		strings.Contains(msg, "ratelimit") ||
+		strings.Contains(msg, "quota") ||
+		strings.Contains(msg, "overloaded") ||
+		strings.Contains(msg, "overload") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "unavailable") {
+		return true
+	}
+	// Transient network errors during long-running batches.
+	if strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "eof") {
+		return true
+	}
+	return false
+}
+
+func truncateErr(err error) string {
+	s := err.Error()
+	if len(s) > 160 {
+		return s[:160] + "…"
+	}
+	return s
 }
 
 // searchBookIDs invokes MCP search_books on the librarian's MCP client and

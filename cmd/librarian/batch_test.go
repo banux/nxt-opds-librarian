@@ -84,3 +84,38 @@ func TestFilterListSetRejectsMalformed(t *testing.T) {
 		t.Error("expected error on empty key")
 	}
 }
+
+func TestIsRateLimitError(t *testing.T) {
+	cases := map[string]bool{
+		// Real provider strings
+		"anthropic 429: rate_limit_error":                         true,
+		"anthropic 529: overloaded_error":                         true,
+		"ollama 429: Too Many Requests":                           true,
+		"ollama 503: model unavailable":                           true,
+		"rate limit exceeded":                                     true,
+		"You exceeded your current quota":                         true,
+		// Transient network classes worth retrying
+		"Post … i/o timeout":                                      true,
+		"read tcp …: connection reset by peer":                    true,
+		"Post … EOF":                                              true,
+		"dial tcp 1.2.3.4: connect: connection refused":           true,
+		// Non-quota errors that should NOT retry
+		"book not found":                                          false,
+		"invalid json":                                            false,
+		"max steps (60) reached":                                  false,
+		"context canceled":                                        false,
+	}
+	for msg, want := range cases {
+		got := isRateLimitError(errString(msg))
+		if got != want {
+			t.Errorf("isRateLimitError(%q) = %v, want %v", msg, got, want)
+		}
+	}
+	if isRateLimitError(nil) {
+		t.Error("nil error should not be a rate-limit")
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
