@@ -37,6 +37,8 @@ func main() {
 		runOnce(args)
 	case "serve":
 		serve(args)
+	case "batch":
+		runBatch(args)
 	case "pair":
 		runPair(args)
 	case "unpair":
@@ -49,7 +51,7 @@ func main() {
 		usage()
 	default:
 		if looksLikeSubcommandTypo(cmd) {
-			fmt.Fprintf(os.Stderr, "librarian: sous-commande inconnue %q. Sous-commandes valides : run, serve, pair, unpair, update, version, help.\n", cmd)
+			fmt.Fprintf(os.Stderr, "librarian: sous-commande inconnue %q. Sous-commandes valides : run, batch, serve, pair, unpair, update, version, help.\n", cmd)
 			fmt.Fprintln(os.Stderr, "Astuce : pour passer un prompt one-shot, utilise `run --prompt \"...\"` (et non un mot isolé).")
 			os.Exit(2)
 		}
@@ -67,6 +69,9 @@ Sous-commandes :
                                 d'appairage one-time généré dans l'UI admin
   unpair  [flags]               Dissocie une instance des deux côtés
   run     [flags] [prompt...]   Lance l'agent une fois (mode CLI)
+  batch   [flags]               Itère search_books + agent par livre, pagination
+                                gérée par Go (pas par le LLM) — idéal pour
+                                « traite tous les 16+ »
   serve   [flags]               Lance le daemon : ticker + webhook + /chat
   update  [flags]               Télécharge et remplace le binaire
   version                       Affiche la version installée
@@ -82,7 +87,9 @@ Exemples :
                  --name jerinn --label "Bibliothèque Jerinn"
   librarian run --instance jerinn "Le Chevalier et la Phalène"     # un livre par titre
   librarian run --instance jerinn --prompt "Traite TOUS les livres non indexés un par un, sans limite. Termine par FIN." \
-                --max-steps 1000                                    # maintenance totale
+                --max-steps 1000                                    # maintenance totale (LLM-piloté)
+  librarian batch --instance jerinn --filter age_rating_min=16     # idem mais pagination déterministe
+  librarian batch --instance jerinn --filter not_indexed=true --dry-run   # voir les IDs avant traitement
   librarian serve --listen :8080 --interval 6h \
                   --max-steps 500 --job-timeout 2h                 # daemon longue durée
   librarian update
