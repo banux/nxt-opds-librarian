@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -81,7 +82,10 @@ func (d *Daemon) heartbeatLoop(ctx context.Context, name, base, chatSecret strin
 
 // postHeartbeat fires one request and returns the HTTP status code so the
 // caller can branch on 404 vs generic 4xx/5xx. err is non-nil only on
-// transport failures (DNS, TCP, timeout, malformed response).
+// transport failures (DNS, TCP, timeout, malformed response) and on
+// non-2xx/404 responses — in which case the error carries the response
+// body so the operator can see what nxt-opds is complaining about
+// without enabling extra logging on the catalog side.
 func postHeartbeat(ctx context.Context, base, chatSecret string) (int, error) {
 	payload, _ := json.Marshal(map[string]string{"agent": "librarian"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/librarian/heartbeat", bytes.NewReader(payload))
@@ -95,10 +99,19 @@ func postHeartbeat(ctx context.Context, base, chatSecret string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return resp.StatusCode, fmt.Errorf("http %d: %s", resp.StatusCode, trimMsg(string(body)))
+	}
 	// Drain so the connection can be reused by keep-alive.
 	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
-		return resp.StatusCode, fmt.Errorf("http %d", resp.StatusCode)
-	}
 	return resp.StatusCode, nil
+}
+
+func trimMsg(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 300 {
+		return s[:300] + "…"
+	}
+	return s
 }
