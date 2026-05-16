@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,7 +36,7 @@ func runPair(args []string) {
 	code := fs.String("code", "", "Code d'appairage one-time généré dans l'UI admin nxt-opds")
 	name := fs.String("name", "", "Slug local de l'instance (ex: jerinn)")
 	label := fs.String("label", "", "Étiquette humaine (ex: \"Bibliothèque Jerinn\")")
-	librarianURL := fs.String("librarian-url", "http://localhost:8080", "URL du librarian (côté nxt-opds) pour les webhooks et le chat")
+	librarianURL := fs.String("librarian-url", "", "URL publique du librarian que nxt-opds doit appeler (chat + webhooks). Défaut : public_url du YAML, sinon dérivé du champ listen.")
 	rotate := fs.Bool("rotate", false, "Renouvelle les secrets pour une instance déjà associée (n'exige pas de code)")
 	force := fs.Bool("force", false, "Force le pairing même si une association existe déjà côté nxt-opds")
 	_ = fs.Parse(args)
@@ -63,6 +64,12 @@ func runPair(args []string) {
 	}
 
 	cfg := loadOrInit(path)
+	resolvedURL := resolveLibrarianURL(*librarianURL, cfg)
+	if resolvedURL == "" {
+		fmt.Fprintln(os.Stderr, "pair: impossible de déterminer --librarian-url. Préciser le flag ou ajouter `public_url:` dans le YAML.")
+		os.Exit(2)
+	}
+	warnLocalhost(resolvedURL)
 
 	// Rotation flow: reuse the current chat_secret as authentication.
 	if *rotate {
@@ -84,7 +91,7 @@ func runPair(args []string) {
 	// Initial pairing flow: send the one-time code, receive the secrets.
 	resp, err := postPair(context.Background(), *nxtOPDS, pairRequest{
 		Code:         *code,
-		LibrarianURL: *librarianURL,
+		LibrarianURL: resolvedURL,
 		Instance:     *name,
 		Label:        *label,
 		Force:        *force,
@@ -95,6 +102,7 @@ func runPair(args []string) {
 	}
 	applyAndSave(&cfg, *name, *label, resp)
 	fmt.Printf("✓ Pairing réussi avec %s\n", *nxtOPDS)
+	fmt.Printf("✓ nxt-opds appellera ce librarian sur : %s\n", resolvedURL)
 	fmt.Printf("✓ Instance « %s » écrite dans %s\n", *name, path)
 	fmt.Println("→ Redémarrer le librarian (serve) pour activer l'instance. La chat box nxt-opds est active immédiatement.")
 }
@@ -298,4 +306,40 @@ func pickLabel(flagLabel, respLabel string) string {
 		return flagLabel
 	}
 	return respLabel
+}
+
+// resolveLibrarianURL picks the URL nxt-opds will POST to. Priority:
+//  1. --librarian-url flag
+//  2. cfg.PublicURL from the YAML
+//  3. derive http://localhost:<port> from cfg.Listen (e.g. ":9090")
+func resolveLibrarianURL(flagURL string, cfg config.Config) string {
+	if flagURL != "" {
+		return strings.TrimRight(flagURL, "/")
+	}
+	if cfg.PublicURL != "" {
+		return strings.TrimRight(cfg.PublicURL, "/")
+	}
+	if cfg.Listen != "" {
+		host, port, err := net.SplitHostPort(cfg.Listen)
+		if err != nil {
+			return ""
+		}
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "localhost"
+		}
+		return fmt.Sprintf("http://%s:%s", host, port)
+	}
+	return ""
+}
+
+func warnLocalhost(u string) {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return
+	}
+	h := parsed.Hostname()
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		fmt.Fprintf(os.Stderr, "⚠ --librarian-url = %s — nxt-opds doit pouvoir résoudre cette URL.\n", u)
+		fmt.Fprintln(os.Stderr, "  Si nxt-opds tourne sur un autre hôte ou dans Docker, préciser --librarian-url ou public_url: dans le YAML.")
+	}
 }

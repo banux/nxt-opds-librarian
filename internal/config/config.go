@@ -18,6 +18,11 @@ import (
 // Config is the on-disk shape of ~/.config/librarian/config.yaml.
 type Config struct {
 	Listen          string        `yaml:"listen"`
+	// PublicURL is the base URL nxt-opds must POST to (chat relay + webhooks).
+	// When empty, `librarian pair` derives it from Listen (e.g. ":9090" →
+	// "http://localhost:9090"). Set this explicitly when nxt-opds runs on
+	// another host or in a Docker network that cannot reach localhost.
+	PublicURL       string        `yaml:"public_url"`
 	IntervalRaw     string        `yaml:"interval"`
 	Interval        time.Duration `yaml:"-"`
 	BatchLimit      int           `yaml:"batch_limit"`
