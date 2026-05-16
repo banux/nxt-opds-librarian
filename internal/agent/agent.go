@@ -8,11 +8,30 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/banux/librarian-agent/internal/llm"
 	"github.com/banux/librarian-agent/internal/mcp"
 )
+
+// Event is one observable step in the agent loop. Used by the daemon's /chat
+// handler to translate the run into a Server-Sent Events stream.
+type Event struct {
+	Kind       string         // "tool_call" | "tool_result" | "text" | "done" | "error"
+	Name       string         // tool name (tool_call / tool_result)
+	Arguments  map[string]any // tool_call payload
+	Result     string         // tool_result content
+	IsError    bool           // tool_result error flag
+	Delta      string         // text frame
+	StopReason string         // done frame
+	Steps      int            // done frame
+	Message    string         // error frame
+}
+
+// EmitFunc receives Events as the loop progresses. Default emitter writes to
+// stdout/stderr for CLI parity.
+type EmitFunc func(Event)
 
 type Agent struct {
 	LLM      llm.Provider
@@ -20,8 +39,18 @@ type Agent struct {
 	MaxSteps int
 	Verbose  bool
 
-	tools     []llm.ToolSpec
-	mcpTools  map[string]bool
+	// Instance identification — surfaced in the system prompt so the LLM cannot
+	// confuse different catalogs when one librarian process drives several.
+	InstanceName  string
+	InstanceLabel string
+	InstanceLocale string
+
+	// Emit receives every step of the run. Defaults to a stdout/stderr printer
+	// when nil — preserving the existing CLI behaviour.
+	Emit EmitFunc
+
+	tools      []llm.ToolSpec
+	mcpTools   map[string]bool
 	transcript []llm.Message
 }
 
@@ -57,11 +86,22 @@ func (a *Agent) Init(ctx context.Context) error {
 
 // Run drives the loop with the user instruction until the model stops.
 func (a *Agent) Run(ctx context.Context, userInstruction string) error {
-	a.transcript = []llm.Message{{Role: llm.RoleUser, Text: userInstruction}}
+	return a.RunWithHistory(ctx, userInstruction, nil)
+}
+
+// RunWithHistory drives the loop seeded with prior conversation turns. The
+// chat endpoint uses this so the LLM remembers earlier exchanges within a
+// session.
+func (a *Agent) RunWithHistory(ctx context.Context, userInstruction string, history []llm.Message) error {
+	a.transcript = append([]llm.Message{}, history...)
+	a.transcript = append(a.transcript, llm.Message{Role: llm.RoleUser, Text: userInstruction})
+	emit := a.emit
+	system := renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
 
 	for step := 0; step < a.MaxSteps; step++ {
-		resp, err := a.LLM.Chat(ctx, SystemPrompt, a.transcript, a.tools)
+		resp, err := a.LLM.Chat(ctx, system, a.transcript, a.tools)
 		if err != nil {
+			emit(Event{Kind: "error", Message: fmt.Sprintf("llm chat: %v", err)})
 			return fmt.Errorf("llm chat: %w", err)
 		}
 
@@ -73,22 +113,19 @@ func (a *Agent) Run(ctx context.Context, userInstruction string) error {
 		a.transcript = append(a.transcript, assistant)
 
 		if resp.Text != "" {
-			fmt.Println(resp.Text)
+			emit(Event{Kind: "text", Delta: resp.Text})
 		}
 
 		if len(resp.ToolCalls) == 0 {
-			if a.Verbose {
-				fmt.Printf("[agent] terminé en %d étapes (stop=%s)\n", step+1, resp.StopReason)
-			}
+			emit(Event{Kind: "done", StopReason: resp.StopReason, Steps: step + 1})
 			return nil
 		}
 
 		toolMsg := llm.Message{Role: llm.RoleTool}
 		for _, tc := range resp.ToolCalls {
-			if a.Verbose {
-				fmt.Printf("[tool] %s %s\n", tc.Name, summarizeArgs(tc.Arguments))
-			}
+			emit(Event{Kind: "tool_call", Name: tc.Name, Arguments: tc.Arguments})
 			content, isErr := a.execTool(ctx, tc)
+			emit(Event{Kind: "tool_result", Name: tc.Name, Result: content, IsError: isErr})
 			toolMsg.ToolResults = append(toolMsg.ToolResults, llm.ToolResult{
 				CallID:  tc.ID,
 				Name:    tc.Name,
@@ -98,8 +135,35 @@ func (a *Agent) Run(ctx context.Context, userInstruction string) error {
 		}
 		a.transcript = append(a.transcript, toolMsg)
 	}
+	emit(Event{Kind: "error", Message: fmt.Sprintf("max steps (%d) reached", a.MaxSteps)})
 	return fmt.Errorf("max steps (%d) reached", a.MaxSteps)
 }
+
+// emit returns the configured emitter or the default CLI printer when nil.
+func (a *Agent) emit(e Event) {
+	if a.Emit != nil {
+		a.Emit(e)
+		return
+	}
+	switch e.Kind {
+	case "text":
+		if e.Delta != "" {
+			fmt.Println(e.Delta)
+		}
+	case "tool_call":
+		if a.Verbose {
+			fmt.Printf("[tool] %s %s\n", e.Name, summarizeArgs(e.Arguments))
+		}
+	case "done":
+		if a.Verbose {
+			fmt.Printf("[agent] terminé en %d étapes (stop=%s)\n", e.Steps, e.StopReason)
+		}
+	case "error":
+		fmt.Fprintln(osStderr, "[agent]", e.Message)
+	}
+}
+
+var osStderr io.Writer = os.Stderr
 
 func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 	if tc.Name == "web_fetch" {

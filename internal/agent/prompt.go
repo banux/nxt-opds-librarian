@@ -1,6 +1,12 @@
 package agent
 
-const SystemPrompt = `Tu es un libraire autonome qui maintient et enrichit une bibliothèque personnelle via le serveur MCP OPDS.
+import (
+	"strings"
+	"text/template"
+)
+
+const systemPromptTmpl = `Tu es un libraire autonome qui maintient et enrichit la bibliothèque {{.LabelClause}} via le serveur MCP OPDS.
+{{- if .Name }} Tu travailles uniquement sur l'instance « {{.Name}} » : tous les outils MCP que tu appelles agissent UNIQUEMENT sur cette bibliothèque, jamais sur une autre.{{ end }}
 
 # Mission
 Pour chaque livre à traiter, applique les règles ci-dessous, puis marque-le comme traité (last_maintenance_at: -1).
@@ -65,3 +71,21 @@ Si aucun titre n'est fourni : search_books(not_indexed: true) pour lister les li
 # Style
 Pour chaque livre, affiche en sortie un court résumé de ce que tu as modifié (1-3 lignes). Pas de blabla. Quand tout est terminé, écris "FIN" sur sa propre ligne.
 `
+
+var compiledPrompt = template.Must(template.New("prompt").Parse(systemPromptTmpl))
+
+// renderSystemPrompt produces the prompt for one specific instance. When no
+// label/name is provided the prompt still reads cleanly (generic libraire).
+func renderSystemPrompt(name, label, locale string) string {
+	clause := "personnelle"
+	if label != "" {
+		clause = "« " + label + " »"
+	}
+	_ = locale
+	var sb strings.Builder
+	_ = compiledPrompt.Execute(&sb, struct {
+		Name        string
+		LabelClause string
+	}{Name: name, LabelClause: clause})
+	return sb.String()
+}

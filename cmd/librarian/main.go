@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/banux/librarian-agent/internal/agent"
+	"github.com/banux/librarian-agent/internal/config"
 	"github.com/banux/librarian-agent/internal/daemon"
+	"github.com/banux/librarian-agent/internal/instances"
 	"github.com/banux/librarian-agent/internal/llm"
-	"github.com/banux/librarian-agent/internal/mcp"
 	"github.com/banux/librarian-agent/internal/updater"
 )
 
@@ -31,6 +31,10 @@ func main() {
 		runOnce(args)
 	case "serve":
 		serve(args)
+	case "pair":
+		runPair(args)
+	case "unpair":
+		runUnpair(args)
 	case "update":
 		update(args)
 	case "version", "--version", "-v":
@@ -45,44 +49,49 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `librarian %s — agent autonome OPDS
+	fmt.Fprintf(os.Stderr, `librarian %s — agent autonome OPDS multi-instances
 
 Sous-commandes :
+  pair    [flags]               Associe ce librarian à un nxt-opds via un code
+                                d'appairage one-time généré dans l'UI admin
+  unpair  [flags]               Dissocie une instance des deux côtés
   run     [flags] [prompt...]   Lance l'agent une fois (mode CLI)
-  serve   [flags]               Lance le daemon : ticker + webhook + /trigger
-  update  [flags]               Télécharge et remplace le binaire avec la dernière release
+  serve   [flags]               Lance le daemon : ticker + webhook + /chat
+  update  [flags]               Télécharge et remplace le binaire
   version                       Affiche la version installée
 
-Variables d'env communes :
-  OPDS_MCP_URL, OPDS_MCP_TOKEN
-  LIBRARIAN_BACKEND, LIBRARIAN_MODEL
+Variables d'env :
+  LIBRARIAN_CONFIG              Chemin du YAML (défaut: ~/.config/librarian/config.yaml)
+  LIBRARIAN_BACKEND             auto | ollama | anthropic
+  LIBRARIAN_MODEL               Nom de modèle
   OLLAMA_HOST, ANTHROPIC_API_KEY
 
 Exemples :
-  librarian run "Le Chevalier et la Phalène"
-  librarian serve --listen :8080 --interval 6h --prompt "..."
+  librarian pair --nxt-opds https://books.jerinn.com --code K4Q9-PN2X \
+                 --name jerinn --label "Bibliothèque Jerinn"
+  librarian run --instance jerinn "Le Chevalier et la Phalène"
+  librarian serve --listen :8080 --interval 6h
   librarian update
-  curl -X POST localhost:8080/trigger -d '{"prompt":"Traite La Boussole..."}'
 `, version)
 }
 
 type commonFlags struct {
-	backend  *string
-	model    *string
-	ollamaEP *string
-	mcpURL   *string
-	mcpToken *string
-	quiet    *bool
+	configPath *string
+	instance   *string
+	backend    *string
+	model      *string
+	ollamaEP   *string
+	quiet      *bool
 }
 
 func registerCommon(fs *flag.FlagSet) *commonFlags {
 	return &commonFlags{
-		backend:  fs.String("backend", envOr("LIBRARIAN_BACKEND", "auto"), "Backend LLM : auto | ollama | anthropic"),
-		model:    fs.String("model", envOr("LIBRARIAN_MODEL", ""), "Modèle (qwen2.5:7b, claude-sonnet-4-6, …)"),
-		ollamaEP: fs.String("ollama-url", envOr("OLLAMA_HOST", "http://localhost:11434"), "Endpoint Ollama"),
-		mcpURL:   fs.String("mcp-url", envOr("OPDS_MCP_URL", "https://books.jerinn.com/mcp"), "Endpoint MCP OPDS"),
-		mcpToken: fs.String("mcp-token", os.Getenv("OPDS_MCP_TOKEN"), "Bearer token MCP OPDS"),
-		quiet:    fs.Bool("quiet", false, "Cache les appels d'outils"),
+		configPath: fs.String("config", envOr("LIBRARIAN_CONFIG", ""), "Chemin du YAML de configuration (défaut: découverte automatique)"),
+		instance:   fs.String("instance", "", "Slug de l'instance à utiliser (obligatoire si plusieurs instances configurées)"),
+		backend:    fs.String("backend", envOr("LIBRARIAN_BACKEND", "auto"), "Backend LLM : auto | ollama | anthropic"),
+		model:      fs.String("model", envOr("LIBRARIAN_MODEL", ""), "Modèle (qwen2.5:7b, claude-sonnet-4-6, …)"),
+		ollamaEP:   fs.String("ollama-url", envOr("OLLAMA_HOST", "http://localhost:11434"), "Endpoint Ollama"),
+		quiet:      fs.Bool("quiet", false, "Cache les appels d'outils"),
 	}
 }
 
@@ -96,13 +105,20 @@ func runOnce(args []string) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	a := buildAgent(ctx, c, *maxSteps, *c.quiet)
+	cfg, registry := loadConfigAndRegistry(c, *maxSteps, !*c.quiet)
+	name := resolveInstance(cfg, *c.instance)
+
+	entry, err := registry.Get(ctx, name)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	instruction := *prompt
 	if instruction == "" {
 		instruction = buildInstruction(fs.Args())
 	}
-	if err := a.Run(ctx, instruction); err != nil {
+	if err := entry.Agent.Run(ctx, instruction); err != nil {
 		fmt.Fprintln(os.Stderr, "run:", err)
 		os.Exit(1)
 	}
@@ -111,29 +127,30 @@ func runOnce(args []string) {
 func serve(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	c := registerCommon(fs)
-	listen := fs.String("listen", ":8080", "Adresse d'écoute HTTP")
-	webhookPath := fs.String("webhook-path", "/webhook/book-added", "Chemin du webhook")
-	webhookSecret := fs.String("webhook-secret", os.Getenv("LIBRARIAN_WEBHOOK_SECRET"), "Secret HMAC pour valider X-Signature (optionnel)")
-	interval := fs.Duration("interval", 6*time.Hour, "Période entre deux maintenances")
-	batchLimit := fs.Int("batch-limit", 10, "Nombre de livres traités par tick")
-	prompt := fs.String("prompt", "", "Prompt remplaçant la maintenance batch par défaut (utilisé par le ticker et /trigger sans body)")
-	maxSteps := fs.Int("max-steps", 60, "Nombre maximum d'étapes par job")
+	listen := fs.String("listen", "", "Adresse d'écoute HTTP (override le YAML)")
+	interval := fs.Duration("interval", 0, "Période entre deux maintenances (override le YAML)")
+	batchLimit := fs.Int("batch-limit", 0, "Nombre de livres traités par tick (override le YAML)")
+	prompt := fs.String("prompt", "", "Prompt remplaçant la maintenance batch par défaut")
+	maxSteps := fs.Int("max-steps", 0, "Nombre maximum d'étapes par job (override le YAML)")
 	_ = fs.Parse(args)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	a := buildAgent(ctx, c, *maxSteps, *c.quiet)
+	maxS := *maxSteps
+	if maxS == 0 {
+		maxS = 60
+	}
+	cfg, registry := loadConfigAndRegistry(c, maxS, !*c.quiet)
 
-	d := daemon.New(daemon.Config{
-		Listen:        *listen,
-		WebhookPath:   *webhookPath,
-		WebhookSecret: *webhookSecret,
-		Interval:      *interval,
-		BatchLimit:    *batchLimit,
-		BatchPrompt:   *prompt,
-	}, a)
+	dcfg := daemon.Config{
+		Listen:      pickStr(*listen, cfg.Listen, ":8080"),
+		Interval:    pickDur(*interval, cfg.Interval, 6*time.Hour),
+		BatchLimit:  pickInt(*batchLimit, cfg.BatchLimit, 10),
+		BatchPrompt: *prompt,
+	}
 
+	d := daemon.New(dcfg, registry)
 	if err := d.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(1)
@@ -170,42 +187,61 @@ func update(args []string) {
 	}
 }
 
-func buildAgent(ctx context.Context, c *commonFlags, maxSteps int, quiet bool) *agent.Agent {
-	if *c.mcpToken == "" {
-		fmt.Fprintln(os.Stderr, "OPDS_MCP_TOKEN non défini (flag --mcp-token ou variable d'env)")
+// loadConfigAndRegistry resolves the config path, parses the YAML, and builds
+// a Registry around the chosen LLM provider. Exits the process on any error
+// so callers can keep their happy path linear.
+func loadConfigAndRegistry(c *commonFlags, maxSteps int, verbose bool) (config.Config, *instances.Registry) {
+	path := *c.configPath
+	if path == "" {
+		path = config.FindConfigFile()
+	}
+	if path == "" {
+		fmt.Fprint(os.Stderr, config.FormatMissingHelp())
 		os.Exit(2)
 	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	provider := buildProvider(*c.backend, *c.model, *c.ollamaEP)
+	return cfg, instances.New(cfg, provider, maxSteps, verbose)
+}
 
-	var provider llm.Provider
-	switch resolveBackend(*c.backend) {
+func resolveInstance(cfg config.Config, flag string) string {
+	if flag != "" {
+		return flag
+	}
+	if cfg.DefaultInstance != "" {
+		return cfg.DefaultInstance
+	}
+	if len(cfg.Instances) == 1 {
+		return cfg.Instances[0].Name
+	}
+	fmt.Fprintln(os.Stderr, "plusieurs instances configurées — préciser --instance <slug>")
+	for _, i := range cfg.Instances {
+		fmt.Fprintf(os.Stderr, "  - %s (%s)\n", i.Name, i.Label)
+	}
+	os.Exit(2)
+	return ""
+}
+
+func buildProvider(backend, model, ollamaEP string) llm.Provider {
+	switch resolveBackend(backend) {
 	case "anthropic":
 		key := os.Getenv("ANTHROPIC_API_KEY")
 		if key == "" {
 			fmt.Fprintln(os.Stderr, "backend=anthropic mais ANTHROPIC_API_KEY non défini")
 			os.Exit(2)
 		}
-		provider = llm.NewAnthropic(key, *c.model)
+		return llm.NewAnthropic(key, model)
 	case "ollama":
-		provider = llm.NewOllama(*c.ollamaEP, defaultModel(*c.model, "qwen2.5:7b"))
+		return llm.NewOllama(ollamaEP, defaultModel(model, "qwen2.5:7b"))
 	default:
-		fmt.Fprintf(os.Stderr, "backend inconnu: %s\n", *c.backend)
+		fmt.Fprintf(os.Stderr, "backend inconnu: %s\n", backend)
 		os.Exit(2)
+		return nil
 	}
-
-	mc := mcp.New(*c.mcpURL, *c.mcpToken)
-	if err := mc.Initialize(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "init MCP:", err)
-		os.Exit(1)
-	}
-
-	a := agent.New(provider, mc)
-	a.MaxSteps = maxSteps
-	a.Verbose = !quiet
-	if err := a.Init(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "init agent:", err)
-		os.Exit(1)
-	}
-	return a
 }
 
 func buildInstruction(args []string) string {
@@ -236,6 +272,36 @@ func defaultModel(provided, fallback string) string {
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+func pickStr(flag, yaml, def string) string {
+	if flag != "" {
+		return flag
+	}
+	if yaml != "" {
+		return yaml
+	}
+	return def
+}
+
+func pickInt(flag, yaml, def int) int {
+	if flag > 0 {
+		return flag
+	}
+	if yaml > 0 {
+		return yaml
+	}
+	return def
+}
+
+func pickDur(flag, yaml, def time.Duration) time.Duration {
+	if flag > 0 {
+		return flag
+	}
+	if yaml > 0 {
+		return yaml
 	}
 	return def
 }
