@@ -20,7 +20,7 @@ func NewOllama(endpoint, model string) *Ollama {
 		endpoint = "http://localhost:11434"
 	}
 	if model == "" {
-		model = "qwen2.5:7b"
+		model = "gemma4:31b-cloud"
 	}
 	return &Ollama{endpoint: endpoint, model: model, http: &http.Client{}}
 }

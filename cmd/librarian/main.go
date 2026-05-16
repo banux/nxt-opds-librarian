@@ -110,7 +110,7 @@ func registerCommon(fs *flag.FlagSet) *commonFlags {
 		configPath: fs.String("config", envOr("LIBRARIAN_CONFIG", ""), "Chemin du YAML de configuration (défaut: découverte automatique)"),
 		instance:   fs.String("instance", "", "Slug de l'instance à utiliser (obligatoire si plusieurs instances configurées)"),
 		backend:    fs.String("backend", envOr("LIBRARIAN_BACKEND", "auto"), "Backend LLM : auto | ollama | anthropic"),
-		model:      fs.String("model", envOr("LIBRARIAN_MODEL", ""), "Modèle (qwen2.5:7b, claude-sonnet-4-6, …)"),
+		model:      fs.String("model", envOr("LIBRARIAN_MODEL", ""), "Modèle (gemma4:31b-cloud, claude-sonnet-4-6, …)"),
 		ollamaEP:   fs.String("ollama-url", envOr("OLLAMA_HOST", "http://localhost:11434"), "Endpoint Ollama"),
 		quiet:      fs.Bool("quiet", false, "Cache les appels d'outils"),
 	}
@@ -268,7 +268,7 @@ func buildProvider(backend, model, ollamaEP string) llm.Provider {
 		}
 		return llm.NewAnthropic(key, model)
 	case "ollama":
-		return llm.NewOllama(ollamaEP, defaultModel(model, "qwen2.5:7b"))
+		return llm.NewOllama(ollamaEP, defaultModel(model, "gemma4:31b-cloud"))
 	default:
 		fmt.Fprintf(os.Stderr, "backend inconnu: %s\n", backend)
 		os.Exit(2)

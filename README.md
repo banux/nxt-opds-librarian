@@ -24,7 +24,7 @@ internal/daemon      # ticker + serveur HTTP + queue serialisée
 
 ## Backends LLM
 
-- **Ollama** (défaut, local) — qwen3.5, qwen2.5:7b, llama3.1, etc.
+- **Ollama** (défaut, local ou Ollama Cloud) — gemma4:31b-cloud (défaut), qwen2.5:7b, llama3.1, etc.
 - **Anthropic** (Claude) — sélectionné si `ANTHROPIC_API_KEY` est défini
 
 Forcer via `--backend ollama|anthropic`.
