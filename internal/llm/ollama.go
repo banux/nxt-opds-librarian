@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type Ollama struct {
@@ -22,7 +23,29 @@ func NewOllama(endpoint, model string) *Ollama {
 	if model == "" {
 		model = "gemma4:31b-cloud"
 	}
-	return &Ollama{endpoint: endpoint, model: model, http: &http.Client{}}
+	return &Ollama{endpoint: normalizeOllamaEndpoint(endpoint), model: model, http: &http.Client{}}
+}
+
+// normalizeOllamaEndpoint strips trailing slashes and any already-appended
+// API path so the client can always concatenate "/api/chat" cleanly. Many
+// operators copy a full endpoint URL ("http://host:11434/api/chat") into
+// OLLAMA_HOST — without normalisation that becomes "/api/chat/api/chat"
+// and the server returns 405. We also strip a bare "/api" prefix that
+// shows up when people grep their browser bar.
+func normalizeOllamaEndpoint(s string) string {
+	s = strings.TrimSpace(s)
+	for strings.HasSuffix(s, "/") {
+		s = strings.TrimSuffix(s, "/")
+	}
+	for _, suffix := range []string{"/api/chat", "/api/generate", "/api"} {
+		if strings.HasSuffix(s, suffix) {
+			s = strings.TrimSuffix(s, suffix)
+			for strings.HasSuffix(s, "/") {
+				s = strings.TrimSuffix(s, "/")
+			}
+		}
+	}
+	return s
 }
 
 func (o *Ollama) Name() string { return "ollama:" + o.model }
