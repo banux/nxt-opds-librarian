@@ -3,12 +3,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/banux/librarian-agent/internal/llm"
@@ -35,9 +37,13 @@ type EmitFunc func(Event)
 
 type Agent struct {
 	LLM      llm.Provider
-	MCP      *mcp.Client
 	MaxSteps int
 	Verbose  bool
+
+	// MCPs holds every MCP server the agent can call. The first one (added by
+	// New) is always the per-instance OPDS server; additional clients (e.g.
+	// obscura's browser MCP) can be attached via AddMCP before Init.
+	MCPs []*mcp.Client
 
 	// Instance identification — surfaced in the system prompt so the LLM cannot
 	// confuse different catalogs when one librarian process drives several.
@@ -49,37 +55,61 @@ type Agent struct {
 	// when nil — preserving the existing CLI behaviour.
 	Emit EmitFunc
 
-	tools      []llm.ToolSpec
-	mcpTools   map[string]bool
-	transcript []llm.Message
+	tools        []llm.ToolSpec
+	toolOwner    map[string]*mcp.Client // MCP tool name → owning client
+	transcript   []llm.Message
 }
 
 func New(p llm.Provider, m *mcp.Client) *Agent {
-	return &Agent{LLM: p, MCP: m, MaxSteps: 40, Verbose: true}
+	return &Agent{LLM: p, MCPs: []*mcp.Client{m}, MaxSteps: 40, Verbose: true}
 }
 
-// Init pulls the tool list from the MCP server and adds the local web_fetch.
-func (a *Agent) Init(ctx context.Context) error {
-	mcpTools, err := a.MCP.ListTools(ctx)
-	if err != nil {
-		return fmt.Errorf("listing MCP tools: %w", err)
+// AddMCP attaches an additional MCP client (e.g. obscura) whose tools will be
+// merged into the agent's tool list at Init time. If two clients expose the
+// same tool name, the FIRST one registered (i.e. OPDS) wins and the conflict
+// is logged when Verbose.
+func (a *Agent) AddMCP(m *mcp.Client) {
+	if m == nil {
+		return
 	}
-	a.mcpTools = make(map[string]bool, len(mcpTools))
-	for _, t := range mcpTools {
-		a.tools = append(a.tools, llm.ToolSpec{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema,
-		})
-		a.mcpTools[t.Name] = true
+	a.MCPs = append(a.MCPs, m)
+}
+
+// Init pulls the tool list from every MCP server and adds the local web_fetch.
+func (a *Agent) Init(ctx context.Context) error {
+	a.toolOwner = map[string]*mcp.Client{}
+	total := 0
+	for i, c := range a.MCPs {
+		if c == nil {
+			continue
+		}
+		mcpTools, err := c.ListTools(ctx)
+		if err != nil {
+			return fmt.Errorf("listing MCP tools (client #%d): %w", i, err)
+		}
+		for _, t := range mcpTools {
+			if _, dup := a.toolOwner[t.Name]; dup {
+				if a.Verbose {
+					fmt.Printf("[agent] tool %q exposed by multiple MCP servers — keeping first\n", t.Name)
+				}
+				continue
+			}
+			a.tools = append(a.tools, llm.ToolSpec{
+				Name:        t.Name,
+				Description: t.Description,
+				InputSchema: t.InputSchema,
+			})
+			a.toolOwner[t.Name] = c
+			total++
+		}
 	}
 	a.tools = append(a.tools, llm.ToolSpec{
 		Name:        "web_fetch",
-		Description: "Récupère le contenu textuel d'une page web (utile pour Babelio, Wikipedia, sites d'éditeurs). Retourne le HTML brut tronqué à ~30k caractères.",
+		Description: "Récupère le contenu d'une page web et renvoie le Markdown rendu (utile pour Babelio, Wikipedia, sites d'éditeurs). Utilise obscura quand disponible (navigateur headless, JS, anti-bot) sinon un simple GET HTTP. Tronqué à ~30k caractères. Pour des interactions plus poussées (cliquer, remplir un formulaire, naviguer), préfère les outils browser_* exposés par obscura quand ils sont disponibles.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL complète https://..."}},"required":["url"]}`),
 	})
 	if a.Verbose {
-		fmt.Printf("[agent] %d outils MCP + 1 local (%s)\n", len(mcpTools), a.LLM.Name())
+		fmt.Printf("[agent] %d outils MCP (%d serveur(s)) + 1 local (%s)\n", total, len(a.MCPs), a.LLM.Name())
 	}
 	return nil
 }
@@ -197,10 +227,11 @@ func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		}
 		return text, false
 	}
-	if !a.mcpTools[tc.Name] {
+	owner, ok := a.toolOwner[tc.Name]
+	if !ok {
 		return fmt.Sprintf("outil inconnu: %s", tc.Name), true
 	}
-	res, err := a.MCP.CallTool(ctx, tc.Name, tc.Arguments)
+	res, err := owner.CallTool(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		return fmt.Sprintf("erreur MCP: %v", err), true
 	}
@@ -219,10 +250,52 @@ func summarizeArgs(args map[string]any) string {
 	return s
 }
 
+const webFetchLimit = 30_000
+
+// webFetch returns the textual content of url, preferring obscura (headless
+// browser, JS rendering, markdown extraction) when it is on $PATH and falling
+// back to a plain HTTP GET + crude HTML strip otherwise.
 func webFetch(ctx context.Context, url string) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("url vide")
 	}
+	if _, err := exec.LookPath("obscura"); err == nil {
+		if text, err := webFetchObscura(ctx, url); err == nil {
+			return truncate(text, webFetchLimit), nil
+		}
+		// fall through to the HTTP fallback on obscura failure
+	}
+	text, err := webFetchHTTP(ctx, url)
+	if err != nil {
+		return "", err
+	}
+	return truncate(text, webFetchLimit), nil
+}
+
+// webFetchObscura shells out to `obscura fetch --dump markdown` and returns
+// stdout. Quiet mode suppresses obscura's own log lines.
+func webFetchObscura(ctx context.Context, url string) (string, error) {
+	cmd := exec.CommandContext(ctx, "obscura", "fetch",
+		"--dump", "markdown",
+		"--quiet",
+		"--timeout", "25",
+		"--stealth",
+		url,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("obscura: %s", msg)
+	}
+	return stdout.String(), nil
+}
+
+func webFetchHTTP(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -237,16 +310,18 @@ func webFetch(ctx context.Context, url string) (string, error) {
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("http %d", resp.StatusCode)
 	}
-	const limit = 30_000
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit*4))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, webFetchLimit*4))
 	if err != nil {
 		return "", err
 	}
-	text := stripHTML(string(body))
-	if len(text) > limit {
-		text = text[:limit] + "\n…[tronqué]"
+	return stripHTML(string(body)), nil
+}
+
+func truncate(s string, limit int) string {
+	if len(s) <= limit {
+		return s
 	}
-	return text, nil
+	return s[:limit] + "\n…[tronqué]"
 }
 
 // stripHTML is intentionally crude — we only want plain text the model can

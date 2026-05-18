@@ -42,6 +42,15 @@ type Registry struct {
 	maxSteps int
 	verbose  bool
 
+	// obscuraURL is the optional Streamable-HTTP MCP endpoint to obscura.
+	// When non-empty, every lazily-initialised agent gets it attached as a
+	// secondary MCP client. The underlying *mcp.Client is shared across
+	// instances and built once on first use (obscuraOnce).
+	obscuraURL    string
+	obscuraOnce   sync.Once
+	obscuraClient *mcp.Client
+	obscuraErr    error
+
 	mu       sync.RWMutex
 	byName   map[string]*Entry
 	bySecret map[string]string // chat_secret -> name
@@ -51,11 +60,12 @@ type Registry struct {
 // here; they are initialised lazily by Get / GetByChatSecret.
 func New(cfg config.Config, provider llm.Provider, maxSteps int, verbose bool) *Registry {
 	r := &Registry{
-		provider: provider,
-		maxSteps: maxSteps,
-		verbose:  verbose,
-		byName:   map[string]*Entry{},
-		bySecret: map[string]string{},
+		provider:   provider,
+		maxSteps:   maxSteps,
+		verbose:    verbose,
+		obscuraURL: cfg.ObscuraMCPURL,
+		byName:     map[string]*Entry{},
+		bySecret:   map[string]string{},
 	}
 	for _, inst := range cfg.Instances {
 		entry := &Entry{Cfg: inst, Jobs: make(chan Job, 16)}
@@ -65,6 +75,23 @@ func New(cfg config.Config, provider llm.Provider, maxSteps int, verbose bool) *
 		}
 	}
 	return r
+}
+
+// obscura returns the shared obscura MCP client, initialised once. Returns
+// (nil, nil) when no obscura URL is configured.
+func (r *Registry) obscura(ctx context.Context) (*mcp.Client, error) {
+	if r.obscuraURL == "" {
+		return nil, nil
+	}
+	r.obscuraOnce.Do(func() {
+		c := mcp.New(r.obscuraURL, "")
+		if err := c.Initialize(ctx); err != nil {
+			r.obscuraErr = fmt.Errorf("init obscura MCP %q: %w", r.obscuraURL, err)
+			return
+		}
+		r.obscuraClient = c
+	})
+	return r.obscuraClient, r.obscuraErr
 }
 
 // List returns the static config of every known instance (no secrets, no
@@ -112,6 +139,17 @@ func (r *Registry) Get(ctx context.Context, name string) (*Entry, error) {
 		a.InstanceName = entry.Cfg.Name
 		a.InstanceLabel = entry.Cfg.Label
 		a.InstanceLocale = entry.Cfg.Locale
+		// Attach the shared obscura MCP client (if configured) so the agent
+		// exposes browser_* tools alongside the OPDS catalog tools. A failure
+		// to reach obscura is logged but non-fatal — the agent falls back to
+		// its built-in web_fetch.
+		if obs, err := r.obscura(ctx); err != nil {
+			if r.verbose {
+				fmt.Printf("[registry] obscura indisponible: %v (agent %q sans browser_*)\n", err, name)
+			}
+		} else if obs != nil {
+			a.AddMCP(obs)
+		}
 		if err := a.Init(ctx); err != nil {
 			entry.err = fmt.Errorf("init agent %q: %w", name, err)
 			return

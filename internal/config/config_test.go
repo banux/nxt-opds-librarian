@@ -108,6 +108,21 @@ func TestUpsertRotatesSecrets(t *testing.T) {
 	}
 }
 
+func TestLoadParsesObscuraMCPURL(t *testing.T) {
+	path := writeFile(t, `
+obscura_mcp_url: "http://127.0.0.1:3000/mcp"
+instances:
+  - {name: "demo", mcp_url: "http://x/mcp", mcp_token: "y"}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ObscuraMCPURL != "http://127.0.0.1:3000/mcp" {
+		t.Errorf("ObscuraMCPURL = %q, want http://127.0.0.1:3000/mcp", cfg.ObscuraMCPURL)
+	}
+}
+
 func TestNxtOPDSBaseURL(t *testing.T) {
 	cases := map[string]string{
 		"https://books.jerinn.com/mcp":     "https://books.jerinn.com",

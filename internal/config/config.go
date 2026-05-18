@@ -33,6 +33,10 @@ type Config struct {
 	Model           string        `yaml:"model"`
 	OllamaURL       string        `yaml:"ollama_url"`
 	DefaultInstance string        `yaml:"default_instance"`
+	// ObscuraMCPURL is an optional Streamable-HTTP endpoint to obscura's MCP
+	// server (e.g. "http://127.0.0.1:3000/mcp"). When set, every agent gets
+	// obscura's browser_* tools alongside the per-instance OPDS tools.
+	ObscuraMCPURL   string        `yaml:"obscura_mcp_url"`
 	Instances       []Instance    `yaml:"instances"`
 
 	// Path is the absolute path the config was loaded from. Used by `librarian
@@ -302,6 +306,9 @@ func NxtOPDSBaseURL(mcpURL string) string {
 const ExampleYAML = `# librarian config
 listen: ":8080"
 interval: "6h"
+
+# Optional: obscura headless-browser MCP server (start with: obscura mcp --http --port 3000)
+# obscura_mcp_url: "http://127.0.0.1:3000/mcp"
 
 instances:
   - name: "default"
