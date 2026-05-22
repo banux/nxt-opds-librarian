@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/banux/librarian-agent/internal/llm"
 	"github.com/banux/librarian-agent/internal/mcp"
@@ -255,20 +257,42 @@ const webFetchLimit = 30_000
 // webFetch returns the textual content of url, preferring obscura (headless
 // browser, JS rendering, markdown extraction) when it is on $PATH and falling
 // back to a plain HTTP GET + crude HTML strip otherwise.
+//
+// Every call emits structured [web_fetch] log lines so the daemon trace shows
+// which backend was tried, whether obscura was found, how long each step took
+// and — on 4xx errors — a short body excerpt (Cloudflare / captcha / "page
+// introuvable" copy is usually visible there).
 func webFetch(ctx context.Context, url string) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("url vide")
 	}
-	if _, err := exec.LookPath("obscura"); err == nil {
-		if text, err := webFetchObscura(ctx, url); err == nil {
+
+	obscuraPath, obscuraLookErr := exec.LookPath("obscura")
+	if obscuraLookErr != nil {
+		log.Printf("[web_fetch] obscura indisponible (%v) — bascule directe sur HTTP — url=%s",
+			obscuraLookErr, url)
+	} else {
+		start := time.Now()
+		text, err := webFetchObscura(ctx, url)
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if err == nil {
+			log.Printf("[web_fetch] obscura ok en %s (%d caractères, bin=%s) — url=%s",
+				elapsed, len(text), obscuraPath, url)
 			return truncate(text, webFetchLimit), nil
 		}
-		// fall through to the HTTP fallback on obscura failure
+		log.Printf("[web_fetch] obscura échec en %s (%v) — fallback HTTP — url=%s",
+			elapsed, err, url)
 	}
+
+	start := time.Now()
 	text, err := webFetchHTTP(ctx, url)
+	elapsed := time.Since(start).Round(time.Millisecond)
 	if err != nil {
+		log.Printf("[web_fetch] http échec en %s: %v — url=%s", elapsed, err, url)
 		return "", err
 	}
+	log.Printf("[web_fetch] http ok en %s (%d caractères) — url=%s",
+		elapsed, len(text), url)
 	return truncate(text, webFetchLimit), nil
 }
 
@@ -290,6 +314,9 @@ func webFetchObscura(ctx context.Context, url string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
+		if len(msg) > 300 {
+			msg = msg[:300] + "…"
+		}
 		return "", fmt.Errorf("obscura: %s", msg)
 	}
 	return stdout.String(), nil
@@ -308,7 +335,22 @@ func webFetchHTTP(ctx context.Context, url string) (string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("http %d", resp.StatusCode)
+		// Read a short snippet of the body so the daemon log surfaces useful
+		// hints (Cloudflare challenge, captcha, redirect copy, etc.).
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		excerpt := strings.TrimSpace(stripHTML(string(snippet)))
+		if len(excerpt) > 240 {
+			excerpt = excerpt[:240] + "…"
+		}
+		finalURL := url
+		if resp.Request != nil && resp.Request.URL != nil {
+			finalURL = resp.Request.URL.String()
+		}
+		if excerpt == "" {
+			return "", fmt.Errorf("http %d %s (final=%s)", resp.StatusCode, http.StatusText(resp.StatusCode), finalURL)
+		}
+		return "", fmt.Errorf("http %d %s (final=%s) — body: %s",
+			resp.StatusCode, http.StatusText(resp.StatusCode), finalURL, excerpt)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, webFetchLimit*4))
 	if err != nil {
