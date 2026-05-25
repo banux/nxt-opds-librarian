@@ -323,6 +323,10 @@ func webFetchFirecrawl(ctx context.Context, url, apiKey string) (string, error) 
 	payload, _ := json.Marshal(map[string]any{
 		"url":     url,
 		"formats": []string{"markdown"},
+		// "stealth" routes the request through residential proxies. ~5x more
+		// expensive in credits per page but the only mode that gets through
+		// Cloudflare / DataDome / Babelio reliably.
+		"proxy": "stealth",
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://api.firecrawl.dev/v2/scrape", bytes.NewReader(payload))
@@ -383,6 +387,15 @@ func webFetchObscura(ctx context.Context, url string) (string, error) {
 		"--quiet",
 		"--timeout", "25",
 		"--stealth",
+		// networkidle waits for anti-bot challenges (Cloudflare interstitials,
+		// JS-injected content) to settle before extraction. Slower than the
+		// default "load" but the only mode that gets stable output on Babelio
+		// and similar guarded sites.
+		"--wait-until", "networkidle",
+		// Realistic recent Chrome UA — obscura's default is fingerprinted by
+		// several WAFs. macOS+Chrome is the most common combo on the web, so
+		// it blends into background traffic.
+		"--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 		url,
 	)
 	var stdout, stderr bytes.Buffer
