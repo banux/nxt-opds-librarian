@@ -53,6 +53,10 @@ type Agent struct {
 	InstanceLabel string
 	InstanceLocale string
 
+	// FirecrawlAPIKey enables the Firecrawl /scrape backend in web_fetch when
+	// non-empty. Tried first, before obscura and the raw HTTP fallback.
+	FirecrawlAPIKey string
+
 	// Emit receives every step of the run. Defaults to a stdout/stderr printer
 	// when nil — preserving the existing CLI behaviour.
 	Emit EmitFunc
@@ -107,7 +111,7 @@ func (a *Agent) Init(ctx context.Context) error {
 	}
 	a.tools = append(a.tools, llm.ToolSpec{
 		Name:        "web_fetch",
-		Description: "Récupère le contenu d'une page web et renvoie le Markdown rendu (utile pour Babelio, Wikipedia, sites d'éditeurs). Utilise obscura quand disponible (navigateur headless, JS, anti-bot) sinon un simple GET HTTP. Tronqué à ~30k caractères. Pour des interactions plus poussées (cliquer, remplir un formulaire, naviguer), préfère les outils browser_* exposés par obscura quand ils sont disponibles.",
+		Description: "Récupère le contenu d'une page web et renvoie le Markdown rendu (utile pour Babelio, Wikipedia, sites d'éditeurs). Essaie d'abord Firecrawl quand une clé est configurée (markdown propre, JS, anti-bot), puis obscura (navigateur headless local), puis un simple GET HTTP. Tronqué à ~30k caractères. Pour des interactions plus poussées (cliquer, remplir un formulaire, naviguer), préfère les outils browser_* exposés par obscura quand ils sont disponibles.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL complète https://..."}},"required":["url"]}`),
 	})
 	if a.Verbose {
@@ -223,7 +227,7 @@ var osStderr io.Writer = os.Stderr
 func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 	if tc.Name == "web_fetch" {
 		url, _ := tc.Arguments["url"].(string)
-		text, err := webFetch(ctx, url)
+		text, err := a.webFetch(ctx, url)
 		if err != nil {
 			return fmt.Sprintf("erreur web_fetch: %v", err), true
 		}
@@ -254,17 +258,33 @@ func summarizeArgs(args map[string]any) string {
 
 const webFetchLimit = 30_000
 
-// webFetch returns the textual content of url, preferring obscura (headless
-// browser, JS rendering, markdown extraction) when it is on $PATH and falling
-// back to a plain HTTP GET + crude HTML strip otherwise.
+// webFetch returns the textual content of url, trying backends in order of
+// quality:
+//  1. Firecrawl /scrape (when a.FirecrawlAPIKey is set) — clean markdown, JS
+//     rendering, anti-bot bypass via a paid hosted API.
+//  2. obscura (when the binary is on $PATH) — local headless browser.
+//  3. plain HTTP GET + crude HTML strip — last-resort fallback.
 //
 // Every call emits structured [web_fetch] log lines so the daemon trace shows
-// which backend was tried, whether obscura was found, how long each step took
-// and — on 4xx errors — a short body excerpt (Cloudflare / captcha / "page
-// introuvable" copy is usually visible there).
-func webFetch(ctx context.Context, url string) (string, error) {
+// which backend was tried, how long each step took, and — on 4xx errors — a
+// short body excerpt (Cloudflare / captcha / "page introuvable" copy is
+// usually visible there).
+func (a *Agent) webFetch(ctx context.Context, url string) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("url vide")
+	}
+
+	if a.FirecrawlAPIKey != "" {
+		start := time.Now()
+		text, err := webFetchFirecrawl(ctx, url, a.FirecrawlAPIKey)
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if err == nil {
+			log.Printf("[web_fetch] firecrawl ok en %s (%d caractères) — url=%s",
+				elapsed, len(text), url)
+			return truncate(text, webFetchLimit), nil
+		}
+		log.Printf("[web_fetch] firecrawl échec en %s (%v) — fallback obscura/HTTP — url=%s",
+			elapsed, err, url)
 	}
 
 	obscuraPath, obscuraLookErr := exec.LookPath("obscura")
@@ -294,6 +314,65 @@ func webFetch(ctx context.Context, url string) (string, error) {
 	log.Printf("[web_fetch] http ok en %s (%d caractères) — url=%s",
 		elapsed, len(text), url)
 	return truncate(text, webFetchLimit), nil
+}
+
+// webFetchFirecrawl calls Firecrawl's v2 /scrape endpoint and returns the
+// markdown payload. The API is described at https://docs.firecrawl.dev — the
+// response wraps the markdown under data.markdown when success is true.
+func webFetchFirecrawl(ctx context.Context, url, apiKey string) (string, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"url":     url,
+		"formats": []string{"markdown"},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.firecrawl.dev/v2/scrape", bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, webFetchLimit*4))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		excerpt := strings.TrimSpace(string(body))
+		if len(excerpt) > 300 {
+			excerpt = excerpt[:300] + "…"
+		}
+		return "", fmt.Errorf("firecrawl http %d: %s", resp.StatusCode, excerpt)
+	}
+
+	var parsed struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+		Data    struct {
+			Markdown string `json:"markdown"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("firecrawl: parse response: %w", err)
+	}
+	if !parsed.Success {
+		msg := parsed.Error
+		if msg == "" {
+			msg = "succès=false sans message"
+		}
+		return "", fmt.Errorf("firecrawl: %s", msg)
+	}
+	if parsed.Data.Markdown == "" {
+		return "", fmt.Errorf("firecrawl: markdown vide")
+	}
+	return parsed.Data.Markdown, nil
 }
 
 // webFetchObscura shells out to `obscura fetch --dump markdown` and returns

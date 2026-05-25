@@ -51,6 +51,11 @@ type Registry struct {
 	obscuraClient *mcp.Client
 	obscuraErr    error
 
+	// firecrawlAPIKey is the optional Firecrawl key forwarded to every agent
+	// so its web_fetch tool can use Firecrawl's /scrape backend before
+	// obscura / raw HTTP. Empty disables that backend.
+	firecrawlAPIKey string
+
 	mu       sync.RWMutex
 	byName   map[string]*Entry
 	bySecret map[string]string // chat_secret -> name
@@ -60,12 +65,13 @@ type Registry struct {
 // here; they are initialised lazily by Get / GetByChatSecret.
 func New(cfg config.Config, provider llm.Provider, maxSteps int, verbose bool) *Registry {
 	r := &Registry{
-		provider:   provider,
-		maxSteps:   maxSteps,
-		verbose:    verbose,
-		obscuraURL: cfg.ObscuraMCPURL,
-		byName:     map[string]*Entry{},
-		bySecret:   map[string]string{},
+		provider:        provider,
+		maxSteps:        maxSteps,
+		verbose:         verbose,
+		obscuraURL:      cfg.ObscuraMCPURL,
+		firecrawlAPIKey: cfg.FirecrawlAPIKey,
+		byName:          map[string]*Entry{},
+		bySecret:        map[string]string{},
 	}
 	for _, inst := range cfg.Instances {
 		entry := &Entry{Cfg: inst, Jobs: make(chan Job, 16)}
@@ -139,6 +145,7 @@ func (r *Registry) Get(ctx context.Context, name string) (*Entry, error) {
 		a.InstanceName = entry.Cfg.Name
 		a.InstanceLabel = entry.Cfg.Label
 		a.InstanceLocale = entry.Cfg.Locale
+		a.FirecrawlAPIKey = r.firecrawlAPIKey
 		// Attach the shared obscura MCP client (if configured) so the agent
 		// exposes browser_* tools alongside the OPDS catalog tools. A failure
 		// to reach obscura is logged but non-fatal — the agent falls back to

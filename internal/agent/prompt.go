@@ -29,7 +29,8 @@ Utilise l'outil web_fetch pour récupérer le contenu d'une URL quand tu as beso
 - Ne pas ajouter de tags techniques ("Doublon", "fiction" générique)
 
 ## 2. Résumé
-- Si absent ou trop court (< 200 caractères), chercher sur Babelio / site éditeur via web_fetch
+- Si absent ou trop court (< 200 caractères), tu DOIS le chercher via web_fetch (Babelio, site éditeur, Livraddict, Wikipedia) — ne laisse JAMAIS un livre sans résumé. Essaie plusieurs sources successivement jusqu'à en trouver un acceptable.
+- Si après 2-3 tentatives sur des sources différentes aucun résumé n'est trouvable, log le et passe au suivant — mais ne marque le livre comme traité (last_maintenance_at: -1) que si tu as réellement échoué à en trouver un, pas par paresse.
 - En français de préférence
 - Nettoyer le HTML : retirer toutes les balises (<div>, <span>, <p>, <br>...), attributs, entités HTML
 - Texte brut avec retours à la ligne normaux
@@ -71,7 +72,7 @@ Après update_book, appeler list_wishlist et chercher une correspondance (titre 
 
 # Workflow par livre
 1. get_book(id) pour avoir l'état complet
-2. Si résumé manquant/court : web_fetch sur Babelio, éditeur, etc.
+2. Si résumé manquant/court (< 200 caractères) : OBLIGATOIRE — web_fetch sur Babelio, site éditeur, Livraddict, etc. Itère sur plusieurs sources si la première ne donne rien. Ne passe à l'étape 3 qu'après avoir réellement essayé.
 3. update_book avec : tags normalisés, summary nettoyé, age_rating, spice_rating (si age_rating ≥ 16), series/series_index/series_total, titre nettoyé, last_maintenance_at: -1
 4. list_wishlist + delete_wishlist_item si correspondance
 

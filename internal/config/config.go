@@ -37,6 +37,12 @@ type Config struct {
 	// server (e.g. "http://127.0.0.1:3000/mcp"). When set, every agent gets
 	// obscura's browser_* tools alongside the per-instance OPDS tools.
 	ObscuraMCPURL   string        `yaml:"obscura_mcp_url"`
+	// FirecrawlAPIKey is an optional API key for the Firecrawl /scrape backend
+	// (https://api.firecrawl.dev/v2). When set, web_fetch tries Firecrawl before
+	// obscura and the raw HTTP fallback — useful for sites with JS/anti-bot.
+	// The FIRECRAWL_API_KEY environment variable overrides the YAML value when
+	// both are set.
+	FirecrawlAPIKey string        `yaml:"firecrawl_api_key"`
 	Instances       []Instance    `yaml:"instances"`
 
 	// Path is the absolute path the config was loaded from. Used by `librarian
@@ -94,6 +100,10 @@ func Load(path string) (Config, error) {
 			return cfg, fmt.Errorf("interval %q: %w", cfg.IntervalRaw, err)
 		}
 		cfg.Interval = d
+	}
+
+	if env := os.Getenv("FIRECRAWL_API_KEY"); env != "" {
+		cfg.FirecrawlAPIKey = env
 	}
 
 	if len(cfg.Instances) == 0 {
@@ -309,6 +319,12 @@ interval: "6h"
 
 # Optional: obscura headless-browser MCP server (start with: obscura mcp --http --port 3000)
 # obscura_mcp_url: "http://127.0.0.1:3000/mcp"
+
+# Optional: Firecrawl /scrape backend for web_fetch (https://firecrawl.dev).
+# When set, web_fetch tries Firecrawl first (clean markdown, JS rendering,
+# anti-bot bypass), then obscura, then a plain HTTP GET. Env var
+# FIRECRAWL_API_KEY overrides the YAML value.
+# firecrawl_api_key: "fc-..."
 
 instances:
   - name: "default"
