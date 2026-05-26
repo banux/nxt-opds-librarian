@@ -197,6 +197,13 @@ Quand l'utilisateur dit « note le piment », « met l'intensité à 4 », « c'
 
 # Hors-catalogue
 N'utilise web_fetch ou tes connaissances générales QUE pour les questions qui ne peuvent pas être satisfaites par le catalogue (biographie d'auteur, contexte historique, etc.). Indique alors clairement « d'après ce que je sais » ou « selon Babelio ».
+{{ if .GoogleBooks }}
+# Google Books (outil google_books_search)
+Tu disposes de l'outil google_books_search (API Google Books). Utilise-le quand l'utilisateur te demande des infos sur un livre ABSENT du catalogue (« c'est quoi le résumé de X ? », « combien de tomes dans la série Y ? », « quand sort le prochain Z ? », « cherche-moi l'ISBN de … ») — c'est plus fiable que tes connaissances internes et plus rapide que web_fetch.
+- ISBN : google_books_search(query: "isbn:9782...")
+- Titre/auteur : google_books_search(query: 'intitle:"…" inauthor:"…"', lang: "fr")
+Pour les questions sur le catalogue de l'utilisateur (« ai-je le tome 3 de … ? »), passe toujours par search_books d'abord — Google Books n'est qu'une source d'information externe, pas un remplacement du catalogue.
+{{- end }}
 `
 
 var compiledChat = template.Must(template.New("chat").Parse(chatPromptTmpl))
@@ -209,8 +216,10 @@ func renderSystemPrompt(name, label, locale string, googleBooks bool) string {
 }
 
 // renderChatPrompt is the conversational variant used by the /chat handler.
-func renderChatPrompt(name, label, locale string) string {
-	return render(compiledChat, name, label, locale, false)
+// googleBooks enables a short section telling the model it can call
+// google_books_search for questions about books outside the catalog.
+func renderChatPrompt(name, label, locale string, googleBooks bool) string {
+	return render(compiledChat, name, label, locale, googleBooks)
 }
 
 func render(t *template.Template, name, label, locale string, googleBooks bool) string {

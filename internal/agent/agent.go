@@ -166,7 +166,7 @@ func (a *Agent) run(ctx context.Context, userInstruction string, history []llm.M
 	var system string
 	switch mode {
 	case ModeChat:
-		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
+		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "")
 	default:
 		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "")
 	}
