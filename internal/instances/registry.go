@@ -56,6 +56,11 @@ type Registry struct {
 	// obscura / raw HTTP. Empty disables that backend.
 	firecrawlAPIKey string
 
+	// googleBooksAPIKey is the optional Google Books key forwarded to every
+	// agent. When set, the agent exposes a google_books_search tool and the
+	// batch system prompt elevates it to priority 1 for metadata lookups.
+	googleBooksAPIKey string
+
 	mu       sync.RWMutex
 	byName   map[string]*Entry
 	bySecret map[string]string // chat_secret -> name
@@ -68,10 +73,11 @@ func New(cfg config.Config, provider llm.Provider, maxSteps int, verbose bool) *
 		provider:        provider,
 		maxSteps:        maxSteps,
 		verbose:         verbose,
-		obscuraURL:      cfg.ObscuraMCPURL,
-		firecrawlAPIKey: cfg.FirecrawlAPIKey,
-		byName:          map[string]*Entry{},
-		bySecret:        map[string]string{},
+		obscuraURL:        cfg.ObscuraMCPURL,
+		firecrawlAPIKey:   cfg.FirecrawlAPIKey,
+		googleBooksAPIKey: cfg.GoogleBooksAPIKey,
+		byName:            map[string]*Entry{},
+		bySecret:          map[string]string{},
 	}
 	for _, inst := range cfg.Instances {
 		entry := &Entry{Cfg: inst, Jobs: make(chan Job, 16)}
@@ -146,6 +152,7 @@ func (r *Registry) Get(ctx context.Context, name string) (*Entry, error) {
 		a.InstanceLabel = entry.Cfg.Label
 		a.InstanceLocale = entry.Cfg.Locale
 		a.FirecrawlAPIKey = r.firecrawlAPIKey
+		a.GoogleBooksAPIKey = r.googleBooksAPIKey
 		// Attach the shared obscura MCP client (if configured) so the agent
 		// exposes browser_* tools alongside the OPDS catalog tools. A failure
 		// to reach obscura is logged but non-fatal — the agent falls back to

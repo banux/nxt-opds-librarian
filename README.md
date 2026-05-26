@@ -118,6 +118,11 @@ model: ""                 # nom du modèle (sinon défaut du backend)
 ollama_url: "http://localhost:11434"
 default_instance: "example"   # utilisée quand --instance est omis
 
+# Optionnel : clé Google Books — active l'outil google_books_search et le
+# place en priorité 1 (avant Babelio / sites éditeurs) pour la recherche de
+# métadonnées. Surchargée par la variable d'env GOOGLE_BOOKS_API_KEY.
+# google_books_api_key: "AIza..."
+
 instances:
   - name: "example"                 # slug [a-z0-9-]+, unique
     mcp_url: "https://books.example.com/mcp"
@@ -150,6 +155,8 @@ Variables d'env supplémentaires :
 | `LIBRARIAN_MODEL`      | nom de modèle |
 | `OLLAMA_HOST`          | endpoint Ollama (défaut `http://localhost:11434`) |
 | `ANTHROPIC_API_KEY`    | clé API Claude |
+| `FIRECRAWL_API_KEY`    | clé Firecrawl pour `web_fetch` (override le YAML) |
+| `GOOGLE_BOOKS_API_KEY` | clé Google Books — active l'outil `google_books_search` en source de métadonnées **prioritaire** (override le YAML) |
 | `LIBRARIAN_CONFIG`     | chemin du YAML |
 
 ---

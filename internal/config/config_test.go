@@ -108,6 +108,37 @@ func TestUpsertRotatesSecrets(t *testing.T) {
 	}
 }
 
+func TestLoadParsesGoogleBooksAPIKey(t *testing.T) {
+	path := writeFile(t, `
+google_books_api_key: "yaml-key"
+instances:
+  - {name: "demo", mcp_url: "http://x/mcp", mcp_token: "y"}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GoogleBooksAPIKey != "yaml-key" {
+		t.Errorf("GoogleBooksAPIKey = %q, want yaml-key", cfg.GoogleBooksAPIKey)
+	}
+}
+
+func TestLoadGoogleBooksEnvOverride(t *testing.T) {
+	t.Setenv("GOOGLE_BOOKS_API_KEY", "env-key")
+	path := writeFile(t, `
+google_books_api_key: "yaml-key"
+instances:
+  - {name: "demo", mcp_url: "http://x/mcp", mcp_token: "y"}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GoogleBooksAPIKey != "env-key" {
+		t.Errorf("GoogleBooksAPIKey = %q, want env-key (env should override yaml)", cfg.GoogleBooksAPIKey)
+	}
+}
+
 func TestLoadParsesObscuraMCPURL(t *testing.T) {
 	path := writeFile(t, `
 obscura_mcp_url: "http://127.0.0.1:3000/mcp"
