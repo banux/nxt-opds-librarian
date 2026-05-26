@@ -57,6 +57,11 @@ type Agent struct {
 	// non-empty. Tried first, before obscura and the raw HTTP fallback.
 	FirecrawlAPIKey string
 
+	// GoogleBooksAPIKey enables the google_books_search tool when non-empty.
+	// When set, the system prompt is rendered with Google Books as the
+	// PRIMARY metadata source (priority 1) — tried before any web_fetch.
+	GoogleBooksAPIKey string
+
 	// Emit receives every step of the run. Defaults to a stdout/stderr printer
 	// when nil — preserving the existing CLI behaviour.
 	Emit EmitFunc
@@ -114,8 +119,17 @@ func (a *Agent) Init(ctx context.Context) error {
 		Description: "Récupère le contenu d'une page web et renvoie le Markdown rendu (utile pour Babelio, Wikipedia, sites d'éditeurs). Essaie d'abord Firecrawl quand une clé est configurée (markdown propre, JS, anti-bot), puis obscura (navigateur headless local), puis un simple GET HTTP. Tronqué à ~30k caractères. Pour des interactions plus poussées (cliquer, remplir un formulaire, naviguer), préfère les outils browser_* exposés par obscura quand ils sont disponibles.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"URL complète https://..."}},"required":["url"]}`),
 	})
+	localTools := 1
+	if a.GoogleBooksAPIKey != "" {
+		a.tools = append(a.tools, llm.ToolSpec{
+			Name:        "google_books_search",
+			Description: "Source PRIORITAIRE pour rechercher des métadonnées de livre (titre, auteur, éditeur, date de parution, résumé, ISBN, catégories, langue) via l'API Google Books. À essayer EN PREMIER avant tout web_fetch quand tu cherches le résumé ou les métadonnées d'un livre — réponse structurée, rapide, fiable, couvre la quasi-totalité des livres édités. La requête `query` accepte du texte libre ou les opérateurs Google Books : `intitle:`, `inauthor:`, `isbn:`, `subject:`. Renvoie jusqu'à 5 volumes.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Requête Google Books. Texte libre ou opérateurs intitle:/inauthor:/isbn:/subject:. Ex: 'intitle:\"Le Chevalier et la Phalène\" inauthor:Chevreuse' ou 'isbn:9782811235567'."},"lang":{"type":"string","description":"Code langue ISO 639-1 pour filtrer (ex: 'fr', 'en'). Optionnel."}},"required":["query"]}`),
+		})
+		localTools++
+	}
 	if a.Verbose {
-		fmt.Printf("[agent] %d outils MCP (%d serveur(s)) + 1 local (%s)\n", total, len(a.MCPs), a.LLM.Name())
+		fmt.Printf("[agent] %d outils MCP (%d serveur(s)) + %d local(aux) (%s)\n", total, len(a.MCPs), localTools, a.LLM.Name())
 	}
 	return nil
 }
@@ -152,9 +166,9 @@ func (a *Agent) run(ctx context.Context, userInstruction string, history []llm.M
 	var system string
 	switch mode {
 	case ModeChat:
-		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
+		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "")
 	default:
-		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale)
+		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "")
 	}
 
 	for step := 0; step < a.MaxSteps; step++ {
@@ -231,6 +245,22 @@ func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		if err != nil {
 			return fmt.Sprintf("erreur web_fetch: %v", err), true
 		}
+		return text, false
+	}
+	if tc.Name == "google_books_search" {
+		if a.GoogleBooksAPIKey == "" {
+			return "google_books_search appelé sans clé API configurée", true
+		}
+		query, _ := tc.Arguments["query"].(string)
+		lang, _ := tc.Arguments["lang"].(string)
+		start := time.Now()
+		text, err := googleBooksSearch(ctx, query, lang, a.GoogleBooksAPIKey)
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if err != nil {
+			log.Printf("[google_books] échec en %s (%v) — query=%q", elapsed, err, query)
+			return fmt.Sprintf("erreur google_books_search: %v", err), true
+		}
+		log.Printf("[google_books] ok en %s (%d caractères) — query=%q", elapsed, len(text), query)
 		return text, false
 	}
 	owner, ok := a.toolOwner[tc.Name]

@@ -11,8 +11,21 @@ const systemPromptTmpl = `Tu es un libraire autonome qui maintient et enrichit l
 # Mission
 Pour chaque livre à traiter, applique les règles ci-dessous, puis marque-le comme traité (last_maintenance_at: -1).
 Travaille en autonomie : ne demande pas confirmation, prends les meilleures décisions raisonnables.
+{{ if .GoogleBooks }}
+# Source PRIORITAIRE : Google Books API
+Tu disposes de l'outil google_books_search (API Google Books). C'est la PREMIÈRE source à interroger pour rechercher des métadonnées de livre : titre, auteur, éditeur, date de parution, résumé, ISBN, catégories, langue, nombre de pages. Réponse structurée, multilingue, couvre la quasi-totalité des livres édités.
 
+Règle : appelle TOUJOURS google_books_search AVANT tout web_fetch quand tu cherches le résumé ou les métadonnées d'un livre. Tombe sur les sources web ci-dessous UNIQUEMENT quand Google Books ne donne pas de résultat exploitable (livre absent, résumé manquant ou trop court).
+
+Bonnes pratiques :
+- Quand tu connais l'ISBN, utilise google_books_search(query: "isbn:9782...") — match exact.
+- Sinon, combine intitle: et inauthor: : google_books_search(query: 'intitle:"Le Chevalier et la Phalène" inauthor:Chevreuse').
+- Pour un résumé en français, précise lang: "fr" — sinon tu peux retomber sur lang: "en" et traduire si besoin.
+{{- end }}
 # Sources d'information fiables (par ordre de PRIORITÉ — fraîcheur + facilité d'accès)
+{{- if .GoogleBooks }}
+0. **google_books_search** (Google Books API) — VOIR ci-dessus, à appeler EN PREMIER.
+{{- end }}
 1. Sites éditeurs officiels — la source la plus FRAÎCHE par définition, dispo dès la parution :
    - Imaginaire/SF/Fantasy : bragelonne.fr, mnemos.com, belial.fr, lumen-editions.com, actusf.com
    - Romantasy/New Romance/Dark Romance : hugopublishing.fr, castelmore.fr, jailu.com, harpercollins.fr
@@ -34,8 +47,11 @@ Utilise l'outil web_fetch pour récupérer le contenu d'une URL quand tu as beso
 - Ne pas ajouter de tags techniques ("Doublon", "fiction" générique)
 
 ## 2. Résumé
-- Si absent ou trop court (< 200 caractères), tu DOIS le chercher via web_fetch — ne laisse JAMAIS un livre sans résumé.
+- Si absent ou trop court (< 200 caractères), tu DOIS le chercher — ne laisse JAMAIS un livre sans résumé.
 - Ordre obligatoire des tentatives (NE PAS commencer par Babelio, et NE PAS commencer par Wikipedia/Open Library pour une nouveauté < 2 ans — ils sont vides pour les sorties récentes) :
+{{- if .GoogleBooks }}
+  0. google_books_search (Google Books API) — TOUJOURS en premier, par ISBN si connu sinon intitle:+inauthor:. Si la description est ≥ 200 caractères, garde-la (traduis vers le français si nécessaire).
+{{- end }}
   1. Site éditeur officiel quand identifiable depuis l'auteur/collection (bragelonne, hugopublishing, castelmore, gallimard, livredepoche, etc.)
   2. Libraire en ligne (decitre.fr, fnac.com, cultura.com, leslibraires.fr) — 4e de couverture dispo dès la parution
   3. Catalogue BnF / data.bnf.fr / Wikidata
@@ -83,7 +99,7 @@ Après update_book, appeler list_wishlist et chercher une correspondance (titre 
 
 # Workflow par livre
 1. get_book(id) pour avoir l'état complet
-2. Si résumé manquant/court (< 200 caractères) : OBLIGATOIRE — web_fetch dans l'ordre site éditeur → libraire en ligne (decitre/fnac/cultura) → BnF/Wikidata → Wikipedia/Open Library → Babelio en DERNIER recours. Itère sur plusieurs sources si la première ne donne rien. Ne passe à l'étape 3 qu'après avoir réellement essayé.
+2. Si résumé manquant/court (< 200 caractères) : OBLIGATOIRE — {{ if .GoogleBooks }}commence TOUJOURS par google_books_search (ISBN si connu, sinon intitle:+inauthor:). Si Google Books ne donne rien d'exploitable, enchaîne avec web_fetch dans l'ordre site éditeur{{ else }}web_fetch dans l'ordre site éditeur{{ end }} → libraire en ligne (decitre/fnac/cultura) → BnF/Wikidata → Wikipedia/Open Library → Babelio en DERNIER recours. Itère sur plusieurs sources si la première ne donne rien. Ne passe à l'étape 3 qu'après avoir réellement essayé.
 3. update_book avec : tags normalisés, summary nettoyé, age_rating, spice_rating (si age_rating ≥ 16), series/series_index/series_total, titre nettoyé, last_maintenance_at: -1
 4. list_wishlist + delete_wishlist_item si correspondance
 
@@ -181,22 +197,32 @@ Quand l'utilisateur dit « note le piment », « met l'intensité à 4 », « c'
 
 # Hors-catalogue
 N'utilise web_fetch ou tes connaissances générales QUE pour les questions qui ne peuvent pas être satisfaites par le catalogue (biographie d'auteur, contexte historique, etc.). Indique alors clairement « d'après ce que je sais » ou « selon Babelio ».
+{{ if .GoogleBooks }}
+# Google Books (outil google_books_search)
+Tu disposes de l'outil google_books_search (API Google Books). Utilise-le quand l'utilisateur te demande des infos sur un livre ABSENT du catalogue (« c'est quoi le résumé de X ? », « combien de tomes dans la série Y ? », « quand sort le prochain Z ? », « cherche-moi l'ISBN de … ») — c'est plus fiable que tes connaissances internes et plus rapide que web_fetch.
+- ISBN : google_books_search(query: "isbn:9782...")
+- Titre/auteur : google_books_search(query: 'intitle:"…" inauthor:"…"', lang: "fr")
+Pour les questions sur le catalogue de l'utilisateur (« ai-je le tome 3 de … ? »), passe toujours par search_books d'abord — Google Books n'est qu'une source d'information externe, pas un remplacement du catalogue.
+{{- end }}
 `
 
 var compiledChat = template.Must(template.New("chat").Parse(chatPromptTmpl))
 
 // renderSystemPrompt produces the autonomous-batch prompt for one specific
-// instance. Used by run/serve ticker/webhook paths.
-func renderSystemPrompt(name, label, locale string) string {
-	return render(compiledPrompt, name, label, locale)
+// instance. Used by run/serve ticker/webhook paths. googleBooks rewires the
+// priority list so the agent uses the google_books_search tool first.
+func renderSystemPrompt(name, label, locale string, googleBooks bool) string {
+	return render(compiledPrompt, name, label, locale, googleBooks)
 }
 
 // renderChatPrompt is the conversational variant used by the /chat handler.
-func renderChatPrompt(name, label, locale string) string {
-	return render(compiledChat, name, label, locale)
+// googleBooks enables a short section telling the model it can call
+// google_books_search for questions about books outside the catalog.
+func renderChatPrompt(name, label, locale string, googleBooks bool) string {
+	return render(compiledChat, name, label, locale, googleBooks)
 }
 
-func render(t *template.Template, name, label, locale string) string {
+func render(t *template.Template, name, label, locale string, googleBooks bool) string {
 	clause := "personnelle"
 	if label != "" {
 		clause = "« " + label + " »"
@@ -206,6 +232,7 @@ func render(t *template.Template, name, label, locale string) string {
 	_ = t.Execute(&sb, struct {
 		Name        string
 		LabelClause string
-	}{Name: name, LabelClause: clause})
+		GoogleBooks bool
+	}{Name: name, LabelClause: clause, GoogleBooks: googleBooks})
 	return sb.String()
 }

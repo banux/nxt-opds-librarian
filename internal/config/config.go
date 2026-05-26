@@ -43,6 +43,13 @@ type Config struct {
 	// The FIRECRAWL_API_KEY environment variable overrides the YAML value when
 	// both are set.
 	FirecrawlAPIKey string        `yaml:"firecrawl_api_key"`
+	// GoogleBooksAPIKey is an optional API key for the Google Books API
+	// (https://developers.google.com/books). When set, the agent gets a
+	// google_books_search tool that is positioned as the PRIMARY metadata
+	// source (priority 1) in the system prompt — tried before any web_fetch
+	// to publisher sites or Babelio. The GOOGLE_BOOKS_API_KEY environment
+	// variable overrides the YAML value when both are set.
+	GoogleBooksAPIKey string      `yaml:"google_books_api_key"`
 	Instances       []Instance    `yaml:"instances"`
 
 	// Path is the absolute path the config was loaded from. Used by `librarian
@@ -104,6 +111,9 @@ func Load(path string) (Config, error) {
 
 	if env := os.Getenv("FIRECRAWL_API_KEY"); env != "" {
 		cfg.FirecrawlAPIKey = env
+	}
+	if env := os.Getenv("GOOGLE_BOOKS_API_KEY"); env != "" {
+		cfg.GoogleBooksAPIKey = env
 	}
 
 	if len(cfg.Instances) == 0 {
@@ -325,6 +335,12 @@ interval: "6h"
 # anti-bot bypass), then obscura, then a plain HTTP GET. Env var
 # FIRECRAWL_API_KEY overrides the YAML value.
 # firecrawl_api_key: "fc-..."
+
+# Optional: Google Books API key (https://developers.google.com/books).
+# When set, the agent gets a google_books_search tool and uses it as the
+# PRIMARY metadata source (priority 1) — tried before any web fetch.
+# Env var GOOGLE_BOOKS_API_KEY overrides the YAML value.
+# google_books_api_key: "AIza..."
 
 instances:
   - name: "default"
