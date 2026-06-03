@@ -1,0 +1,13 @@
+[Unit]
+Description=Vérifie une nouvelle release nxt-opds-librarian toutes les heures
+Documentation=https://github.com/banux/nxt-opds-librarian
+
+[Timer]
+OnCalendar=hourly
+# Rattrape l'exécution manquée si la machine était éteinte à l'heure pile.
+Persistent=true
+# Étale l'appel à l'API GitHub sur 0–5 min pour ne pas taper toutes les heures pile.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,31 @@
+#!/bin/sh
+# librarian-autoupdate — vérifie la dernière release GitHub, installe si une
+# nouvelle version existe, et NE redémarre le daemon QUE si une mise à jour a
+# réellement eu lieu (sinon on couperait un batch en cours toutes les heures
+# pour rien).
+#
+# Lancé par librarian-update.service (oneshot) déclenché par librarian-update.timer.
+# Doit tourner en root : il écrase /usr/local/bin/librarian et appelle systemctl.
+#
+# Variables surchargeables (via Environment= dans le .service) :
+#   LIBRARIAN_BIN      chemin du binaire        (défaut /usr/local/bin/librarian)
+#   LIBRARIAN_SERVICE  unité serve à redémarrer (défaut librarian.service)
+set -eu
+
+BIN="${LIBRARIAN_BIN:-/usr/local/bin/librarian}"
+SERVICE="${LIBRARIAN_SERVICE:-librarian.service}"
+
+out="$("$BIN" update)"
+printf '%s\n' "$out"
+
+# "mis à jour : vX → vY (...)" n'est imprimé que quand une release a été
+# installée ; "déjà à jour (...)" ne contient pas cette chaîne. cf. cmd/librarian/main.go
+case "$out" in
+  *"mis à jour"*)
+    echo "nouvelle version installée — redémarrage de ${SERVICE}"
+    systemctl restart "$SERVICE"
+    ;;
+  *)
+    echo "déjà à jour — pas de redémarrage"
+    ;;
+esac

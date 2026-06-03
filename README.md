@@ -401,6 +401,36 @@ Cible : `api.github.com/repos/banux/nxt-opds-librarian/releases/latest`.
 L'asset correspondant à `GOOS-GOARCH` est rename'é atomiquement sur le
 binaire courant.
 
+### Auto-update horaire (systemd)
+
+`deploy/systemd/` fournit un timer qui vérifie une nouvelle release **toutes
+les heures** et ne redémarre le daemon **que si** une version a réellement été
+installée (un `update` sans nouveauté ne coupe pas un batch en cours) :
+
+```bash
+sudo install -m 0755 deploy/systemd/librarian-autoupdate /usr/local/bin/
+sudo install -m 0644 deploy/systemd/librarian-update.service /etc/systemd/system/
+sudo install -m 0644 deploy/systemd/librarian-update.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now librarian-update.timer
+```
+
+Adapter le chemin du binaire ou le nom de l'unité `serve` (défauts
+`/usr/local/bin/librarian` et `librarian.service`) via `Environment=` dans
+`librarian-update.service`.
+
+Vérifier / tester :
+
+```bash
+systemctl list-timers librarian-update.timer   # prochaine échéance
+sudo systemctl start librarian-update.service   # forcer un cycle maintenant
+journalctl -u librarian-update.service          # logs (version installée ou « déjà à jour »)
+```
+
+Le wrapper tourne en root (il écrase le binaire et appelle `systemctl`). La
+vérification anonyme de l'API GitHub (60 req/h) suffit largement à une cadence
+horaire.
+
 ---
 
 ## Licence

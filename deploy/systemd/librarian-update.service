@@ -1,0 +1,13 @@
+[Unit]
+Description=Auto-update nxt-opds-librarian vers la dernière release GitHub
+Documentation=https://github.com/banux/nxt-opds-librarian
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Redémarre librarian.service uniquement si une nouvelle version a été installée.
+ExecStart=/usr/local/bin/librarian-autoupdate
+# Décommenter pour adapter les chemins/nom d'unité :
+# Environment=LIBRARIAN_BIN=/usr/local/bin/librarian
+# Environment=LIBRARIAN_SERVICE=librarian.service
