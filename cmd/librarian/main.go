@@ -111,7 +111,7 @@ func registerCommon(fs *flag.FlagSet) *commonFlags {
 		instance:   fs.String("instance", "", "Slug de l'instance à utiliser (obligatoire si plusieurs instances configurées)"),
 		backend:    fs.String("backend", envOr("LIBRARIAN_BACKEND", "auto"), "Backend LLM : auto | ollama | anthropic"),
 		model:      fs.String("model", envOr("LIBRARIAN_MODEL", ""), "Modèle (gemma4:31b-cloud, claude-sonnet-4-6, …)"),
-		ollamaEP:   fs.String("ollama-url", envOr("OLLAMA_HOST", "http://localhost:11434"), "Endpoint Ollama"),
+		ollamaEP:   fs.String("ollama-url", envOr("OLLAMA_HOST", ""), "Endpoint Ollama (défaut: ollama_url du yaml, puis http://localhost:11434)"),
 		quiet:      fs.Bool("quiet", false, "Cache les appels d'outils"),
 	}
 }
@@ -236,7 +236,7 @@ func loadConfigAndRegistry(c *commonFlags, maxSteps int, verbose bool) (config.C
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	provider := buildProvider(*c.backend, *c.model, *c.ollamaEP)
+	provider := buildProvider(*c.backend, *c.model, *c.ollamaEP, cfg.OllamaURL)
 	return cfg, instances.New(cfg, provider, maxSteps, verbose)
 }
 
@@ -258,7 +258,7 @@ func resolveInstance(cfg config.Config, flag string) string {
 	return ""
 }
 
-func buildProvider(backend, model, ollamaEP string) llm.Provider {
+func buildProvider(backend, model, ollamaEP, cfgOllamaURL string) llm.Provider {
 	switch resolveBackend(backend) {
 	case "anthropic":
 		key := os.Getenv("ANTHROPIC_API_KEY")
@@ -268,7 +268,7 @@ func buildProvider(backend, model, ollamaEP string) llm.Provider {
 		}
 		return llm.NewAnthropic(key, model)
 	case "ollama":
-		return llm.NewOllama(ollamaEP, defaultModel(model, "gemma4:31b-cloud"))
+		return llm.NewOllama(resolveOllamaEndpoint(ollamaEP, cfgOllamaURL), defaultModel(model, "gemma4:31b-cloud"))
 	default:
 		fmt.Fprintf(os.Stderr, "backend inconnu: %s\n", backend)
 		os.Exit(2)
@@ -292,6 +292,16 @@ func resolveBackend(b string) string {
 		return "anthropic"
 	}
 	return "ollama"
+}
+
+// resolveOllamaEndpoint applies the precedence -ollama-url / OLLAMA_HOST env
+// (flagEP) over the yaml ollama_url (cfgURL). When both are empty NewOllama
+// falls back to http://localhost:11434.
+func resolveOllamaEndpoint(flagEP, cfgURL string) string {
+	if flagEP != "" {
+		return flagEP
+	}
+	return cfgURL
 }
 
 func defaultModel(provided, fallback string) string {

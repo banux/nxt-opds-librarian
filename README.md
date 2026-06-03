@@ -115,7 +115,7 @@ batch_limit: 10           # nb de livres traités par tick
 max_steps: 200            # plafond d'étapes par job
 backend: "auto"           # auto | ollama | anthropic
 model: ""                 # nom du modèle (sinon défaut du backend)
-ollama_url: "http://localhost:11434"
+ollama_url: "http://localhost:11434"   # endpoint Ollama ; surchargé par OLLAMA_HOST / --ollama-url
 default_instance: "example"   # utilisée quand --instance est omis
 
 # Optionnel : clé Google Books — active l'outil google_books_search et le
@@ -153,7 +153,7 @@ Variables d'env supplémentaires :
 |------------------------|------|
 | `LIBRARIAN_BACKEND`    | `auto` (défaut) / `ollama` / `anthropic` |
 | `LIBRARIAN_MODEL`      | nom de modèle |
-| `OLLAMA_HOST`          | endpoint Ollama (défaut `http://localhost:11434`) |
+| `OLLAMA_HOST`          | endpoint Ollama — l'emporte sur `ollama_url` du YAML (défaut `http://localhost:11434`) |
 | `ANTHROPIC_API_KEY`    | clé API Claude |
 | `FIRECRAWL_API_KEY`    | clé Firecrawl pour `web_fetch` (override le YAML) |
 | `GOOGLE_BOOKS_API_KEY` | clé Google Books — active l'outil `google_books_search` en source de métadonnées **prioritaire** (override le YAML) |
