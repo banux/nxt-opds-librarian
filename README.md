@@ -155,7 +155,7 @@ Variables d'env supplémentaires :
 | `LIBRARIAN_MODEL`      | nom de modèle |
 | `OLLAMA_HOST`          | endpoint Ollama — l'emporte sur `ollama_url` du YAML (défaut `http://localhost:11434`) |
 | `ANTHROPIC_API_KEY`    | clé API Claude |
-| `FIRECRAWL_API_KEY`    | clé Firecrawl pour `web_fetch` (override le YAML) |
+| `FIRECRAWL_API_KEY`    | clé Firecrawl — backend de `web_fetch` **et** active l'outil `web_search` (recherche web via Firecrawl, au lieu de scraper un moteur). Override le YAML |
 | `GOOGLE_BOOKS_API_KEY` | clé Google Books — active l'outil `google_books_search` en source de métadonnées **prioritaire** (override le YAML) |
 | `LIBRARIAN_CONFIG`     | chemin du YAML |
 

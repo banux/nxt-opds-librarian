@@ -128,6 +128,14 @@ func (a *Agent) Init(ctx context.Context) error {
 		})
 		localTools++
 	}
+	if a.FirecrawlAPIKey != "" {
+		a.tools = append(a.tools, llm.ToolSpec{
+			Name:        "web_search",
+			Description: "Recherche sur le web via Firecrawl : renvoie une liste de résultats (titre, URL, court extrait) pour une requête en langage naturel. Utilise CET outil pour DÉCOUVRIR la bonne page (fiche éditeur, libraire en ligne, Wikipedia, BnF…) d'un livre, puis appelle web_fetch sur l'URL la plus pertinente. N'appelle JAMAIS web_fetch directement sur une URL de moteur de recherche (google.com/search, bing.com, duckduckgo.com…) : passe par web_search. Paramètre optionnel `limit` (1-5, défaut 5).",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Requête de recherche en langage naturel, ex: 'Le Chevalier et la Phalène Chevreuse résumé éditeur'."},"limit":{"type":"integer","description":"Nombre de résultats (1-5, défaut 5). Optionnel."}},"required":["query"]}`),
+		})
+		localTools++
+	}
 	if a.Verbose {
 		fmt.Printf("[agent] %d outils MCP (%d serveur(s)) + %d local(aux) (%s)\n", total, len(a.MCPs), localTools, a.LLM.Name())
 	}
@@ -166,9 +174,9 @@ func (a *Agent) run(ctx context.Context, userInstruction string, history []llm.M
 	var system string
 	switch mode {
 	case ModeChat:
-		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "")
+		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "", a.FirecrawlAPIKey != "")
 	default:
-		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "")
+		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "", a.FirecrawlAPIKey != "")
 	}
 
 	for step := 0; step < a.MaxSteps; step++ {
@@ -245,6 +253,25 @@ func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		if err != nil {
 			return fmt.Sprintf("erreur web_fetch: %v", err), true
 		}
+		return text, false
+	}
+	if tc.Name == "web_search" {
+		if a.FirecrawlAPIKey == "" {
+			return "web_search appelé sans clé Firecrawl configurée", true
+		}
+		query, _ := tc.Arguments["query"].(string)
+		limit := 0
+		if v, ok := tc.Arguments["limit"].(float64); ok {
+			limit = int(v)
+		}
+		start := time.Now()
+		text, err := webSearchFirecrawl(ctx, query, limit, a.FirecrawlAPIKey)
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if err != nil {
+			log.Printf("[web_search] échec en %s (%v) — query=%q", elapsed, err, query)
+			return fmt.Sprintf("erreur web_search: %v", err), true
+		}
+		log.Printf("[web_search] ok en %s (%d caractères) — query=%q", elapsed, len(text), query)
 		return text, false
 	}
 	if tc.Name == "google_books_search" {
@@ -407,6 +434,106 @@ func webFetchFirecrawl(ctx context.Context, url, apiKey string) (string, error) 
 		return "", fmt.Errorf("firecrawl: markdown vide")
 	}
 	return parsed.Data.Markdown, nil
+}
+
+const webSearchMaxResults = 5
+
+type firecrawlSearchResult struct {
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// webSearchFirecrawl calls Firecrawl's v2 /search endpoint and returns the
+// results formatted as a numbered list (title, URL, snippet). This replaces
+// scraping a public search engine: with a Firecrawl key the agent gets clean,
+// anti-bot SERP data it can then web_fetch. The agent must NOT web_fetch a
+// search-engine URL — it calls web_search instead.
+func webSearchFirecrawl(ctx context.Context, query string, limit int, apiKey string) (string, error) {
+	if query == "" {
+		return "", fmt.Errorf("query vide")
+	}
+	if limit <= 0 || limit > webSearchMaxResults {
+		limit = webSearchMaxResults
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"query": query,
+		"limit": limit,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://api.firecrawl.dev/v2/search", bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, webFetchLimit*4))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		excerpt := strings.TrimSpace(string(body))
+		if len(excerpt) > 300 {
+			excerpt = excerpt[:300] + "…"
+		}
+		return "", fmt.Errorf("firecrawl http %d: %s", resp.StatusCode, excerpt)
+	}
+
+	var parsed struct {
+		Success bool            `json:"success"`
+		Error   string          `json:"error"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("firecrawl: parse response: %w", err)
+	}
+	if !parsed.Success {
+		msg := parsed.Error
+		if msg == "" {
+			msg = "succès=false sans message"
+		}
+		return "", fmt.Errorf("firecrawl: %s", msg)
+	}
+
+	results := parseFirecrawlSearchData(parsed.Data)
+	if len(results) == 0 {
+		return "", fmt.Errorf("firecrawl: aucun résultat pour %q", query)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d résultat(s) pour %q :\n\n", len(results), query)
+	for i, r := range results {
+		fmt.Fprintf(&b, "%d. %s\n   %s\n", i+1, strings.TrimSpace(r.Title), strings.TrimSpace(r.URL))
+		if d := strings.TrimSpace(r.Description); d != "" {
+			fmt.Fprintf(&b, "   %s\n", d)
+		}
+	}
+	return truncate(b.String(), webFetchLimit), nil
+}
+
+// parseFirecrawlSearchData handles both the v2 grouped shape ({"web":[…]}) and
+// the legacy v1 flat array ([…]) so a Firecrawl API bump doesn't break search.
+func parseFirecrawlSearchData(raw json.RawMessage) []firecrawlSearchResult {
+	var grouped struct {
+		Web []firecrawlSearchResult `json:"web"`
+	}
+	if err := json.Unmarshal(raw, &grouped); err == nil && len(grouped.Web) > 0 {
+		return grouped.Web
+	}
+	var flat []firecrawlSearchResult
+	if err := json.Unmarshal(raw, &flat); err == nil && len(flat) > 0 {
+		return flat
+	}
+	return nil
 }
 
 // webFetchObscura shells out to `obscura fetch --dump markdown` and returns

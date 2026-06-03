@@ -35,6 +35,9 @@ Bonnes pratiques :
 4. Wikipedia (fr.wikipedia.org, en.wikipedia.org) et Open Library (openlibrary.org) — bons pour les titres établis / backlist ; souvent ABSENTS pour les nouveautés < 2 ans
 5. Babelio, Livraddict — derniers recours quand rien d'autre ne donne, ces sites bloquent souvent
 Utilise l'outil web_fetch pour récupérer le contenu d'une URL quand tu as besoin de chercher un résumé ou un nombre de tomes. Si une source de niveau supérieur (1-4) donne déjà ce qu'il faut, ne descends PAS à Babelio — c'est plus lent et plus risqué.
+{{- if .Firecrawl }}
+Pour DÉCOUVRIR la bonne URL (fiche éditeur, libraire, Wikipedia, BnF) quand tu ne la connais pas, utilise l'outil web_search : il interroge un moteur via Firecrawl et renvoie titres + URLs + extraits. N'appelle JAMAIS web_fetch sur une URL de moteur de recherche (google.com/search, bing.com, duckduckgo.com…) — passe par web_search, puis web_fetch sur le résultat le plus pertinent.
+{{- end }}
 
 # Règles d'enrichissement (dans l'ordre)
 
@@ -197,6 +200,9 @@ Quand l'utilisateur dit « note le piment », « met l'intensité à 4 », « c'
 
 # Hors-catalogue
 N'utilise web_fetch ou tes connaissances générales QUE pour les questions qui ne peuvent pas être satisfaites par le catalogue (biographie d'auteur, contexte historique, etc.). Indique alors clairement « d'après ce que je sais » ou « selon Babelio ».
+{{- if .Firecrawl }}
+Pour trouver une page externe dont tu ignores l'URL, utilise l'outil web_search (recherche via Firecrawl : titres + URLs + extraits), puis web_fetch sur le meilleur résultat. N'appelle jamais web_fetch sur une URL de moteur de recherche (google.com/search, bing.com…).
+{{- end }}
 {{ if .GoogleBooks }}
 # Google Books (outil google_books_search)
 Tu disposes de l'outil google_books_search (API Google Books). Utilise-le quand l'utilisateur te demande des infos sur un livre ABSENT du catalogue (« c'est quoi le résumé de X ? », « combien de tomes dans la série Y ? », « quand sort le prochain Z ? », « cherche-moi l'ISBN de … ») — c'est plus fiable que tes connaissances internes et plus rapide que web_fetch.
@@ -210,19 +216,22 @@ var compiledChat = template.Must(template.New("chat").Parse(chatPromptTmpl))
 
 // renderSystemPrompt produces the autonomous-batch prompt for one specific
 // instance. Used by run/serve ticker/webhook paths. googleBooks rewires the
-// priority list so the agent uses the google_books_search tool first.
-func renderSystemPrompt(name, label, locale string, googleBooks bool) string {
-	return render(compiledPrompt, name, label, locale, googleBooks)
+// priority list so the agent uses the google_books_search tool first; firecrawl
+// tells it to discover URLs via the web_search tool instead of scraping a
+// search engine.
+func renderSystemPrompt(name, label, locale string, googleBooks, firecrawl bool) string {
+	return render(compiledPrompt, name, label, locale, googleBooks, firecrawl)
 }
 
 // renderChatPrompt is the conversational variant used by the /chat handler.
 // googleBooks enables a short section telling the model it can call
-// google_books_search for questions about books outside the catalog.
-func renderChatPrompt(name, label, locale string, googleBooks bool) string {
-	return render(compiledChat, name, label, locale, googleBooks)
+// google_books_search for questions about books outside the catalog; firecrawl
+// enables the web_search guidance.
+func renderChatPrompt(name, label, locale string, googleBooks, firecrawl bool) string {
+	return render(compiledChat, name, label, locale, googleBooks, firecrawl)
 }
 
-func render(t *template.Template, name, label, locale string, googleBooks bool) string {
+func render(t *template.Template, name, label, locale string, googleBooks, firecrawl bool) string {
 	clause := "personnelle"
 	if label != "" {
 		clause = "« " + label + " »"
@@ -233,6 +242,7 @@ func render(t *template.Template, name, label, locale string, googleBooks bool) 
 		Name        string
 		LabelClause string
 		GoogleBooks bool
-	}{Name: name, LabelClause: clause, GoogleBooks: googleBooks})
+		Firecrawl   bool
+	}{Name: name, LabelClause: clause, GoogleBooks: googleBooks, Firecrawl: firecrawl})
 	return sb.String()
 }
