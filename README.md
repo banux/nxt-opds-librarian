@@ -336,6 +336,10 @@ docker compose restart librarian
 Un `docker-compose.yml` complet (nxt-opds + librarian) est fourni dans
 `../../docker-compose.yml`.
 
+Pour une **installation propre du stack complet** (nxt-opds + librarian, Docker
+ou systemd, appairage, vérifications) destinée à un agent ou à un humain qui
+suit pas à pas, voir [`deploy/AGENT-INSTALL.md`](deploy/AGENT-INSTALL.md).
+
 ---
 
 ## Logs
