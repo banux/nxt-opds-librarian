@@ -56,8 +56,28 @@ jobs:
           path: dist/librarian-${{ matrix.goos }}-${{ matrix.goarch }}
           if-no-files-found: error
 
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+  # Single release job so only ONE workflow run touches the release. Previously
+  # the "Attach to release" step lived inside the build matrix, so all 4 legs
+  # raced to create tag v0.39 via softprops/action-gh-release — the loser(s)
+  # failed with "already_exists" and their binaries (e.g. linux-amd64) never
+  # landed on the published release.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: librarian-*
+          merge-multiple: true
+
+      - name: List binaries
+        run: ls -la dist
+
+      - name: Create release and attach binaries
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/librarian-${{ matrix.goos }}-${{ matrix.goarch }}
+          files: dist/librarian-*
+          fail_on_unmatched_files: true
