@@ -154,6 +154,46 @@ instances:
 	}
 }
 
+func TestLoadParsesCamofox(t *testing.T) {
+	path := writeFile(t, `
+camofox_url: "http://127.0.0.1:9377"
+camofox_access_key: "yaml-secret"
+instances:
+  - {name: "demo", mcp_url: "http://x/mcp", mcp_token: "y"}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CamofoxURL != "http://127.0.0.1:9377" {
+		t.Errorf("CamofoxURL = %q, want http://127.0.0.1:9377", cfg.CamofoxURL)
+	}
+	if cfg.CamofoxAccessKey != "yaml-secret" {
+		t.Errorf("CamofoxAccessKey = %q, want yaml-secret", cfg.CamofoxAccessKey)
+	}
+}
+
+func TestLoadCamofoxEnvOverride(t *testing.T) {
+	t.Setenv("CAMOFOX_URL", "http://env-host:9377")
+	t.Setenv("CAMOFOX_ACCESS_KEY", "env-secret")
+	path := writeFile(t, `
+camofox_url: "http://127.0.0.1:9377"
+camofox_access_key: "yaml-secret"
+instances:
+  - {name: "demo", mcp_url: "http://x/mcp", mcp_token: "y"}
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CamofoxURL != "http://env-host:9377" {
+		t.Errorf("CamofoxURL = %q, want env override", cfg.CamofoxURL)
+	}
+	if cfg.CamofoxAccessKey != "env-secret" {
+		t.Errorf("CamofoxAccessKey = %q, want env override", cfg.CamofoxAccessKey)
+	}
+}
+
 func TestNxtOPDSBaseURL(t *testing.T) {
 	cases := map[string]string{
 		"https://books.jerinn.com/mcp":     "https://books.jerinn.com",

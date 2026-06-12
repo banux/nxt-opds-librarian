@@ -52,3 +52,40 @@ func TestParseFirecrawlSearchData(t *testing.T) {
 		})
 	}
 }
+
+func TestFilterCamofoxSearchLinks(t *testing.T) {
+	links := []camofoxLink{
+		{Text: "Google logo", Href: "https://www.google.com/imghp"},    // engine chrome → dropped
+		{Text: "À propos", Href: "https://accounts.google.com/signin"}, // internal → dropped
+		{Text: "anchor", Href: "#main"},                                // fragment → dropped
+		{Text: "js", Href: "javascript:void(0)"},                       // js → dropped
+		{Text: "Le Chevalier et la Phalène — Bragelonne", Href: "https://www.google.com/url?q=https://bragelonne.fr/livre/123&sa=U"}, // redirect → unwrapped
+		{Text: "Decitre", Href: "https://www.decitre.fr/livres/le-chevalier.html"},                                                   // organic
+		{Text: "Decitre dup", Href: "https://www.decitre.fr/livres/le-chevalier.html"},                                               // dup → dropped
+		{Text: "Babelio", Href: "https://www.babelio.com/livres/x/456"},                                                              // organic
+		{Text: "relative", Href: "/local/path"},                                                                                      // no host → dropped
+	}
+
+	got := filterCamofoxSearchLinks(links, 5)
+	want := []string{
+		"https://bragelonne.fr/livre/123",
+		"https://www.decitre.fr/livres/le-chevalier.html",
+		"https://www.babelio.com/livres/x/456",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].URL != w {
+			t.Errorf("result %d URL = %q, want %q", i, got[i].URL, w)
+		}
+	}
+	if got[0].Title != "Le Chevalier et la Phalène — Bragelonne" {
+		t.Errorf("result 0 title = %q", got[0].Title)
+	}
+
+	// limit is honoured.
+	if l := filterCamofoxSearchLinks(links, 1); len(l) != 1 || l[0].URL != want[0] {
+		t.Errorf("limit=1 → %+v", l)
+	}
+}

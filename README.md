@@ -157,6 +157,8 @@ Variables d'env supplémentaires :
 | `ANTHROPIC_API_KEY`    | clé API Claude |
 | `FIRECRAWL_API_KEY`    | clé Firecrawl — backend de `web_fetch` **et** active l'outil `web_search` (recherche web via Firecrawl, au lieu de scraper un moteur). Override le YAML |
 | `GOOGLE_BOOKS_API_KEY` | clé Google Books — active l'outil `google_books_search` en source de métadonnées **prioritaire** (override le YAML) |
+| `CAMOFOX_URL`          | URL d'un serveur [camofox-browser](https://github.com/jo-inc/camofox-browser) (Firefox stealth local, ex. `http://127.0.0.1:9377`) — backend de `web_fetch` (essayé après Firecrawl, avant obscura) **et** active `web_search` via la macro `@google_search` quand aucune clé Firecrawl n'est posée. Override le YAML |
+| `CAMOFOX_ACCESS_KEY`   | bearer attendu par camofox uniquement s'il est lancé avec `CAMOFOX_ACCESS_KEY` (exposé hors loopback). Override le YAML |
 | `LIBRARIAN_CONFIG`     | chemin du YAML |
 
 ---

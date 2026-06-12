@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -61,6 +62,14 @@ type Agent struct {
 	// When set, the system prompt is rendered with Google Books as the
 	// PRIMARY metadata source (priority 1) — tried before any web_fetch.
 	GoogleBooksAPIKey string
+
+	// CamofoxURL is the base URL of a camofox-browser server (local stealth
+	// Firefox). When non-empty, web_fetch tries camofox after Firecrawl and
+	// before obscura, and web_search uses camofox's @google_search macro when
+	// no Firecrawl key is configured. CamofoxAccessKey is sent as a bearer
+	// token when the server is started with CAMOFOX_ACCESS_KEY.
+	CamofoxURL       string
+	CamofoxAccessKey string
 
 	// Emit receives every step of the run. Defaults to a stdout/stderr printer
 	// when nil — preserving the existing CLI behaviour.
@@ -128,10 +137,10 @@ func (a *Agent) Init(ctx context.Context) error {
 		})
 		localTools++
 	}
-	if a.FirecrawlAPIKey != "" {
+	if a.FirecrawlAPIKey != "" || a.CamofoxURL != "" {
 		a.tools = append(a.tools, llm.ToolSpec{
 			Name:        "web_search",
-			Description: "Recherche sur le web via Firecrawl : renvoie une liste de résultats (titre, URL, court extrait) pour une requête en langage naturel. Utilise CET outil pour DÉCOUVRIR la bonne page (fiche éditeur, libraire en ligne, Wikipedia, BnF…) d'un livre, puis appelle web_fetch sur l'URL la plus pertinente. N'appelle JAMAIS web_fetch directement sur une URL de moteur de recherche (google.com/search, bing.com, duckduckgo.com…) : passe par web_search. Paramètre optionnel `limit` (1-5, défaut 5).",
+			Description: "Recherche sur le web : renvoie une liste de résultats (titre, URL, court extrait) pour une requête en langage naturel. Utilise CET outil pour DÉCOUVRIR la bonne page (fiche éditeur, libraire en ligne, Wikipedia, BnF…) d'un livre, puis appelle web_fetch sur l'URL la plus pertinente. N'appelle JAMAIS web_fetch directement sur une URL de moteur de recherche (google.com/search, bing.com, duckduckgo.com…) : passe par web_search. Paramètre optionnel `limit` (1-5, défaut 5).",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Requête de recherche en langage naturel, ex: 'Le Chevalier et la Phalène Chevreuse résumé éditeur'."},"limit":{"type":"integer","description":"Nombre de résultats (1-5, défaut 5). Optionnel."}},"required":["query"]}`),
 		})
 		localTools++
@@ -172,11 +181,12 @@ func (a *Agent) run(ctx context.Context, userInstruction string, history []llm.M
 	a.transcript = append(a.transcript, llm.Message{Role: llm.RoleUser, Text: userInstruction})
 	emit := a.emit
 	var system string
+	hasWebSearch := a.FirecrawlAPIKey != "" || a.CamofoxURL != ""
 	switch mode {
 	case ModeChat:
-		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "", a.FirecrawlAPIKey != "")
+		system = renderChatPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "", hasWebSearch)
 	default:
-		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "", a.FirecrawlAPIKey != "")
+		system = renderSystemPrompt(a.InstanceName, a.InstanceLabel, a.InstanceLocale, a.GoogleBooksAPIKey != "", hasWebSearch)
 	}
 
 	for step := 0; step < a.MaxSteps; step++ {
@@ -256,8 +266,8 @@ func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 		return text, false
 	}
 	if tc.Name == "web_search" {
-		if a.FirecrawlAPIKey == "" {
-			return "web_search appelé sans clé Firecrawl configurée", true
+		if a.FirecrawlAPIKey == "" && a.CamofoxURL == "" {
+			return "web_search appelé sans backend (ni clé Firecrawl ni camofox_url configurés)", true
 		}
 		query, _ := tc.Arguments["query"].(string)
 		limit := 0
@@ -265,13 +275,24 @@ func (a *Agent) execTool(ctx context.Context, tc llm.ToolCall) (string, bool) {
 			limit = int(v)
 		}
 		start := time.Now()
-		text, err := webSearchFirecrawl(ctx, query, limit, a.FirecrawlAPIKey)
+		var (
+			text    string
+			err     error
+			backend string
+		)
+		if a.FirecrawlAPIKey != "" {
+			backend = "firecrawl"
+			text, err = webSearchFirecrawl(ctx, query, limit, a.FirecrawlAPIKey)
+		} else {
+			backend = "camofox"
+			text, err = webSearchCamofox(ctx, a.CamofoxURL, a.CamofoxAccessKey, a.camofoxUserID(), query, limit)
+		}
 		elapsed := time.Since(start).Round(time.Millisecond)
 		if err != nil {
-			log.Printf("[web_search] échec en %s (%v) — query=%q", elapsed, err, query)
+			log.Printf("[web_search] %s échec en %s (%v) — query=%q", backend, elapsed, err, query)
 			return fmt.Sprintf("erreur web_search: %v", err), true
 		}
-		log.Printf("[web_search] ok en %s (%d caractères) — query=%q", elapsed, len(text), query)
+		log.Printf("[web_search] %s ok en %s (%d caractères) — query=%q", backend, elapsed, len(text), query)
 		return text, false
 	}
 	if tc.Name == "google_books_search" {
@@ -319,8 +340,10 @@ const webFetchLimit = 30_000
 // quality:
 //  1. Firecrawl /scrape (when a.FirecrawlAPIKey is set) — clean markdown, JS
 //     rendering, anti-bot bypass via a paid hosted API.
-//  2. obscura (when the binary is on $PATH) — local headless browser.
-//  3. plain HTTP GET + crude HTML strip — last-resort fallback.
+//  2. camofox-browser (when a.CamofoxURL is set) — local stealth Firefox,
+//     anti-Cloudflare; returns a token-efficient accessibility snapshot.
+//  3. obscura (when the binary is on $PATH) — local headless browser.
+//  4. plain HTTP GET + crude HTML strip — last-resort fallback.
 //
 // Every call emits structured [web_fetch] log lines so the daemon trace shows
 // which backend was tried, how long each step took, and — on 4xx errors — a
@@ -340,7 +363,20 @@ func (a *Agent) webFetch(ctx context.Context, url string) (string, error) {
 				elapsed, len(text), url)
 			return truncate(text, webFetchLimit), nil
 		}
-		log.Printf("[web_fetch] firecrawl échec en %s (%v) — fallback obscura/HTTP — url=%s",
+		log.Printf("[web_fetch] firecrawl échec en %s (%v) — fallback camofox/obscura/HTTP — url=%s",
+			elapsed, err, url)
+	}
+
+	if a.CamofoxURL != "" {
+		start := time.Now()
+		text, err := webFetchCamofox(ctx, a.CamofoxURL, a.CamofoxAccessKey, a.camofoxUserID(), url)
+		elapsed := time.Since(start).Round(time.Millisecond)
+		if err == nil {
+			log.Printf("[web_fetch] camofox ok en %s (%d caractères) — url=%s",
+				elapsed, len(text), url)
+			return truncate(text, webFetchLimit), nil
+		}
+		log.Printf("[web_fetch] camofox échec en %s (%v) — fallback obscura/HTTP — url=%s",
 			elapsed, err, url)
 	}
 
@@ -534,6 +570,292 @@ func parseFirecrawlSearchData(raw json.RawMessage) []firecrawlSearchResult {
 		return flat
 	}
 	return nil
+}
+
+// --- camofox-browser backend -------------------------------------------------
+//
+// camofox-browser (https://github.com/jo-inc/camofox-browser) is a local
+// stealth Firefox exposed over a small HTTP API. Pages are driven through a tab
+// lifecycle: POST /tabs opens (and navigates) a tab, GET /tabs/{id}/snapshot
+// returns a token-efficient accessibility snapshot, POST /tabs/{id}/navigate
+// runs a search macro, GET /tabs/{id}/links lists anchors, DELETE /tabs/{id}
+// closes the tab. Every tab we open is closed again, best-effort.
+
+const (
+	// camofoxSessionKey groups all librarian tabs under one camofox session per
+	// user. We open and immediately close one tab per fetch/search, so the tab
+	// limit per session is never an issue.
+	camofoxSessionKey = "librarian"
+	// camofoxSnapshotPages bounds snapshot pagination per fetch so a huge page
+	// cannot loop forever; we stop earlier once webFetchLimit is reached.
+	camofoxSnapshotPages = 8
+)
+
+// camofoxUserID is the per-instance camofox session owner. A stable id (one per
+// catalog) keeps camofox's per-user concurrency accounting predictable while
+// isolating instances from each other. Falls back to "librarian" when unnamed.
+func (a *Agent) camofoxUserID() string {
+	if a.InstanceName != "" {
+		return a.InstanceName
+	}
+	return "librarian"
+}
+
+// camofoxRequest issues one JSON request to a camofox-browser server. body is
+// marshalled as JSON when non-nil; accessKey (only needed when camofox runs
+// with CAMOFOX_ACCESS_KEY) is sent as a bearer token. Returns the raw body and
+// status code, erroring only on transport/marshal failure — HTTP status is left
+// to the caller.
+func camofoxRequest(ctx context.Context, method, endpoint, accessKey string, body any) ([]byte, int, error) {
+	var rdr io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, err
+		}
+		rdr = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, rdr)
+	if err != nil {
+		return nil, 0, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	if accessKey != "" {
+		req.Header.Set("Authorization", "Bearer "+accessKey)
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, webFetchLimit*4))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return data, resp.StatusCode, nil
+}
+
+// camofoxStatusErr formats a non-2xx camofox response with a short body excerpt
+// (404 "tab not found", 429 "tab limit", auth failures, …).
+func camofoxStatusErr(action string, status int, body []byte) error {
+	excerpt := strings.TrimSpace(string(body))
+	if len(excerpt) > 300 {
+		excerpt = excerpt[:300] + "…"
+	}
+	if excerpt == "" {
+		return fmt.Errorf("camofox %s: http %d", action, status)
+	}
+	return fmt.Errorf("camofox %s: http %d: %s", action, status, excerpt)
+}
+
+// camofoxOpenTab opens a tab (optionally navigating to target) and returns its
+// id. The caller is responsible for closing it via camofoxCloseTab.
+func camofoxOpenTab(ctx context.Context, base, accessKey, userID, target string) (string, error) {
+	payload := map[string]any{"userId": userID, "sessionKey": camofoxSessionKey}
+	if target != "" {
+		payload["url"] = target
+	}
+	body, status, err := camofoxRequest(ctx, http.MethodPost, base+"/tabs", accessKey, payload)
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", camofoxStatusErr("create tab", status, body)
+	}
+	var tab struct {
+		TabID string `json:"tabId"`
+	}
+	if err := json.Unmarshal(body, &tab); err != nil || tab.TabID == "" {
+		return "", fmt.Errorf("camofox: réponse create tab inattendue: %s", truncate(strings.TrimSpace(string(body)), 200))
+	}
+	return tab.TabID, nil
+}
+
+// camofoxCloseTab closes a tab, best-effort. Uses a fresh background context so
+// cleanup still runs when the parent context was cancelled mid-fetch.
+func camofoxCloseTab(base, accessKey, userID, tabID string) {
+	endpoint := base + "/tabs/" + url.PathEscape(tabID) + "?userId=" + url.QueryEscape(userID)
+	_, _, _ = camofoxRequest(context.Background(), http.MethodDelete, endpoint, accessKey, nil)
+}
+
+// webFetchCamofox opens target in a camofox tab and returns the accessibility
+// snapshot (text), paginating large pages up to webFetchLimit.
+func webFetchCamofox(ctx context.Context, baseURL, accessKey, userID, target string) (string, error) {
+	if target == "" {
+		return "", fmt.Errorf("url vide")
+	}
+	base := strings.TrimRight(baseURL, "/")
+
+	tabID, err := camofoxOpenTab(ctx, base, accessKey, userID, target)
+	if err != nil {
+		return "", err
+	}
+	defer camofoxCloseTab(base, accessKey, userID, tabID)
+
+	var b strings.Builder
+	offset := 0
+	for page := 0; page < camofoxSnapshotPages; page++ {
+		snapURL := fmt.Sprintf("%s/tabs/%s/snapshot?userId=%s&offset=%d",
+			base, url.PathEscape(tabID), url.QueryEscape(userID), offset)
+		body, status, err := camofoxRequest(ctx, http.MethodGet, snapURL, accessKey, nil)
+		if err != nil {
+			return "", err
+		}
+		if status >= 400 {
+			return "", camofoxStatusErr("snapshot", status, body)
+		}
+		var snap struct {
+			Snapshot   string `json:"snapshot"`
+			HasMore    bool   `json:"hasMore"`
+			NextOffset int    `json:"nextOffset"`
+		}
+		if err := json.Unmarshal(body, &snap); err != nil {
+			return "", fmt.Errorf("camofox: parse snapshot: %w", err)
+		}
+		b.WriteString(snap.Snapshot)
+		if !snap.HasMore || snap.Snapshot == "" || b.Len() >= webFetchLimit || snap.NextOffset <= offset {
+			break
+		}
+		offset = snap.NextOffset
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return "", fmt.Errorf("camofox: snapshot vide pour %s", target)
+	}
+	return out, nil
+}
+
+type camofoxLink struct {
+	Text string `json:"text"`
+	Href string `json:"href"`
+}
+
+// webSearchCamofox runs the @google_search macro in a camofox tab and returns
+// the organic result links formatted as the same numbered list web_search
+// produces with Firecrawl. Used as the web_search backend when no Firecrawl key
+// is configured.
+func webSearchCamofox(ctx context.Context, baseURL, accessKey, userID, query string, limit int) (string, error) {
+	if query == "" {
+		return "", fmt.Errorf("query vide")
+	}
+	if limit <= 0 || limit > webSearchMaxResults {
+		limit = webSearchMaxResults
+	}
+	base := strings.TrimRight(baseURL, "/")
+
+	tabID, err := camofoxOpenTab(ctx, base, accessKey, userID, "")
+	if err != nil {
+		return "", err
+	}
+	defer camofoxCloseTab(base, accessKey, userID, tabID)
+
+	body, status, err := camofoxRequest(ctx, http.MethodPost,
+		base+"/tabs/"+url.PathEscape(tabID)+"/navigate", accessKey, map[string]any{
+			"userId": userID,
+			"macro":  "@google_search",
+			"query":  query,
+		})
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", camofoxStatusErr("navigate macro", status, body)
+	}
+
+	linksURL := base + "/tabs/" + url.PathEscape(tabID) + "/links?userId=" + url.QueryEscape(userID)
+	body, status, err = camofoxRequest(ctx, http.MethodGet, linksURL, accessKey, nil)
+	if err != nil {
+		return "", err
+	}
+	if status >= 400 {
+		return "", camofoxStatusErr("links", status, body)
+	}
+	var parsed struct {
+		Links []camofoxLink `json:"links"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("camofox: parse links: %w", err)
+	}
+
+	results := filterCamofoxSearchLinks(parsed.Links, limit)
+	if len(results) == 0 {
+		return "", fmt.Errorf("camofox: aucun résultat exploitable pour %q", query)
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%d résultat(s) pour %q :\n\n", len(results), query)
+	for i, r := range results {
+		fmt.Fprintf(&sb, "%d. %s\n   %s\n", i+1, strings.TrimSpace(r.Title), strings.TrimSpace(r.URL))
+	}
+	return truncate(sb.String(), webFetchLimit), nil
+}
+
+// camofoxSERPNoise lists host/URL substrings that are search-engine chrome or
+// Google's own internal links rather than organic result destinations.
+var camofoxSERPNoise = []string{
+	"google.", "gstatic.", "googleusercontent.", "schema.org",
+	"bing.com", "duckduckgo.com", "accounts.", "policies.", "support.",
+}
+
+// normalizeCamofoxResultURL unwraps Google's /url?q= and /imgres redirect links
+// to the real destination so the noise filter sees the actual host.
+func normalizeCamofoxResultURL(href string) string {
+	u, err := url.Parse(href)
+	if err != nil {
+		return href
+	}
+	if strings.Contains(strings.ToLower(u.Host), "google") && (u.Path == "/url" || u.Path == "/imgres") {
+		if q := u.Query().Get("q"); q != "" {
+			return q
+		}
+		if q := u.Query().Get("url"); q != "" {
+			return q
+		}
+	}
+	return href
+}
+
+// filterCamofoxSearchLinks turns the raw SERP anchors into up to limit organic
+// results: it unwraps Google redirects, drops search-engine/internal noise and
+// non-http links, and dedupes by URL while preserving order.
+func filterCamofoxSearchLinks(links []camofoxLink, limit int) []firecrawlSearchResult {
+	if limit <= 0 || limit > webSearchMaxResults {
+		limit = webSearchMaxResults
+	}
+	var out []firecrawlSearchResult
+	seen := map[string]bool{}
+	for _, l := range links {
+		href := normalizeCamofoxResultURL(strings.TrimSpace(l.Href))
+		if !isCamofoxResultURL(href) || seen[href] {
+			continue
+		}
+		seen[href] = true
+		out = append(out, firecrawlSearchResult{URL: href, Title: strings.TrimSpace(l.Text)})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func isCamofoxResultURL(href string) bool {
+	if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") {
+		return false
+	}
+	u, err := url.Parse(href)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	for _, n := range camofoxSERPNoise {
+		if strings.Contains(host, n) {
+			return false
+		}
+	}
+	return true
 }
 
 // webFetchObscura shells out to `obscura fetch --dump markdown` and returns

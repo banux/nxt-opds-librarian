@@ -61,6 +61,13 @@ type Registry struct {
 	// batch system prompt elevates it to priority 1 for metadata lookups.
 	googleBooksAPIKey string
 
+	// camofoxURL / camofoxAccessKey are the optional camofox-browser endpoint
+	// and bearer token forwarded to every agent: web_fetch tries camofox after
+	// Firecrawl and before obscura, and web_search uses camofox's @google_search
+	// macro when no Firecrawl key is configured.
+	camofoxURL       string
+	camofoxAccessKey string
+
 	mu       sync.RWMutex
 	byName   map[string]*Entry
 	bySecret map[string]string // chat_secret -> name
@@ -76,6 +83,8 @@ func New(cfg config.Config, provider llm.Provider, maxSteps int, verbose bool) *
 		obscuraURL:        cfg.ObscuraMCPURL,
 		firecrawlAPIKey:   cfg.FirecrawlAPIKey,
 		googleBooksAPIKey: cfg.GoogleBooksAPIKey,
+		camofoxURL:        cfg.CamofoxURL,
+		camofoxAccessKey:  cfg.CamofoxAccessKey,
 		byName:            map[string]*Entry{},
 		bySecret:          map[string]string{},
 	}
@@ -153,6 +162,8 @@ func (r *Registry) Get(ctx context.Context, name string) (*Entry, error) {
 		a.InstanceLocale = entry.Cfg.Locale
 		a.FirecrawlAPIKey = r.firecrawlAPIKey
 		a.GoogleBooksAPIKey = r.googleBooksAPIKey
+		a.CamofoxURL = r.camofoxURL
+		a.CamofoxAccessKey = r.camofoxAccessKey
 		// Attach the shared obscura MCP client (if configured) so the agent
 		// exposes browser_* tools alongside the OPDS catalog tools. A failure
 		// to reach obscura is logged but non-fatal — the agent falls back to

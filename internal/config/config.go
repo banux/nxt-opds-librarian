@@ -50,6 +50,18 @@ type Config struct {
 	// to publisher sites or Babelio. The GOOGLE_BOOKS_API_KEY environment
 	// variable overrides the YAML value when both are set.
 	GoogleBooksAPIKey string      `yaml:"google_books_api_key"`
+	// CamofoxURL is an optional base URL to a camofox-browser server
+	// (https://github.com/jo-inc/camofox-browser), e.g. "http://127.0.0.1:9377".
+	// When set, web_fetch tries camofox (local stealth Firefox, anti-Cloudflare)
+	// after Firecrawl and before obscura; and web_search falls back to camofox's
+	// @google_search macro when no Firecrawl key is configured. The CAMOFOX_URL
+	// environment variable overrides the YAML value.
+	CamofoxURL string `yaml:"camofox_url"`
+	// CamofoxAccessKey is the optional bearer token a camofox-browser server
+	// requires when started with CAMOFOX_ACCESS_KEY (i.e. exposed beyond
+	// loopback). Empty when camofox runs unauthenticated on localhost. The
+	// CAMOFOX_ACCESS_KEY environment variable overrides the YAML value.
+	CamofoxAccessKey string `yaml:"camofox_access_key"`
 	Instances       []Instance    `yaml:"instances"`
 
 	// Path is the absolute path the config was loaded from. Used by `librarian
@@ -114,6 +126,12 @@ func Load(path string) (Config, error) {
 	}
 	if env := os.Getenv("GOOGLE_BOOKS_API_KEY"); env != "" {
 		cfg.GoogleBooksAPIKey = env
+	}
+	if env := os.Getenv("CAMOFOX_URL"); env != "" {
+		cfg.CamofoxURL = env
+	}
+	if env := os.Getenv("CAMOFOX_ACCESS_KEY"); env != "" {
+		cfg.CamofoxAccessKey = env
 	}
 
 	if len(cfg.Instances) == 0 {
@@ -341,6 +359,15 @@ interval: "6h"
 # PRIMARY metadata source (priority 1) — tried before any web fetch.
 # Env var GOOGLE_BOOKS_API_KEY overrides the YAML value.
 # google_books_api_key: "AIza..."
+
+# Optional: camofox-browser server (https://github.com/jo-inc/camofox-browser),
+# a local stealth Firefox for anti-bot sites. When set, web_fetch tries camofox
+# after Firecrawl and before obscura, and web_search falls back to its
+# @google_search macro when no Firecrawl key is set. Env var CAMOFOX_URL
+# overrides the YAML value; camofox_access_key (env CAMOFOX_ACCESS_KEY) is only
+# needed when the server is started with CAMOFOX_ACCESS_KEY.
+# camofox_url: "http://127.0.0.1:9377"
+# camofox_access_key: ""
 
 instances:
   - name: "default"
