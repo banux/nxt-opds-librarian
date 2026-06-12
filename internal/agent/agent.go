@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -696,6 +697,23 @@ func webFetchCamofox(ctx context.Context, baseURL, accessKey, userID, target str
 	}
 	defer camofoxCloseTab(base, accessKey, userID, tabID)
 
+	snap, err := camofoxAccessibilitySnapshot(ctx, base, accessKey, userID, tabID)
+	if err != nil {
+		return "", err
+	}
+	out := strings.TrimSpace(snap)
+	if out == "" {
+		return "", fmt.Errorf("camofox: snapshot vide pour %s", target)
+	}
+	return out, nil
+}
+
+// camofoxAccessibilitySnapshot returns the accessibility-tree snapshot of a tab,
+// concatenated across up to camofoxSnapshotPages pages and capped near
+// webFetchLimit. It is the shared primitive behind both web_fetch (page text)
+// and web_search (the SERP, whose organic results carry their destination on
+// /url: lines — see parseCamofoxSnapshotLinks).
+func camofoxAccessibilitySnapshot(ctx context.Context, base, accessKey, userID, tabID string) (string, error) {
 	var b strings.Builder
 	offset := 0
 	for page := 0; page < camofoxSnapshotPages; page++ {
@@ -722,11 +740,7 @@ func webFetchCamofox(ctx context.Context, baseURL, accessKey, userID, target str
 		}
 		offset = snap.NextOffset
 	}
-	out := strings.TrimSpace(b.String())
-	if out == "" {
-		return "", fmt.Errorf("camofox: snapshot vide pour %s", target)
-	}
-	return out, nil
+	return b.String(), nil
 }
 
 type camofoxLink struct {
@@ -766,22 +780,16 @@ func webSearchCamofox(ctx context.Context, baseURL, accessKey, userID, query str
 		return "", camofoxStatusErr("navigate macro", status, body)
 	}
 
-	linksURL := base + "/tabs/" + url.PathEscape(tabID) + "/links?userId=" + url.QueryEscape(userID)
-	body, status, err = camofoxRequest(ctx, http.MethodGet, linksURL, accessKey, nil)
+	// The /links endpoint only surfaces the SERP chrome (Google's own footer:
+	// policies./support. links) which the noise filter strips, leaving nothing.
+	// The organic results live in the accessibility snapshot, each as a
+	// `- link "Title" [eN]:` node with its destination on a `- /url: ...` line.
+	snap, err := camofoxAccessibilitySnapshot(ctx, base, accessKey, userID, tabID)
 	if err != nil {
 		return "", err
 	}
-	if status >= 400 {
-		return "", camofoxStatusErr("links", status, body)
-	}
-	var parsed struct {
-		Links []camofoxLink `json:"links"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", fmt.Errorf("camofox: parse links: %w", err)
-	}
 
-	results := filterCamofoxSearchLinks(parsed.Links, limit)
+	results := filterCamofoxSearchLinks(parseCamofoxSnapshotLinks(snap), limit)
 	if len(results) == 0 {
 		return "", fmt.Errorf("camofox: aucun résultat exploitable pour %q", query)
 	}
@@ -816,6 +824,40 @@ func normalizeCamofoxResultURL(href string) string {
 		}
 	}
 	return href
+}
+
+var (
+	// camofoxSnapshotLinkRe captures the visible title of an accessibility-tree
+	// link node, e.g. `- link "Primal Hunter, la série" [e9]:`. The capture is
+	// greedy so titles containing quotes survive (the final quote is the
+	// closing one, before the ` [eN]` ref).
+	camofoxSnapshotLinkRe = regexp.MustCompile(`^\s*-\s+link\s+"(.*)"`)
+	// camofoxSnapshotURLRe captures the destination on a node's /url: line,
+	// e.g. `  - /url: https://booknode.com/serie/primal-hunter`.
+	camofoxSnapshotURLRe = regexp.MustCompile(`^\s*-\s+/url:\s*(\S+)`)
+)
+
+// parseCamofoxSnapshotLinks extracts (title, href) pairs from a Playwright-style
+// accessibility snapshot of a Google SERP. Each organic result is a
+// `- link "Title" [eN]:` node whose real destination sits on a nested
+// `- /url: ...` line; the title is associated with the nearest preceding link
+// node and consumed once emitted so it never bleeds onto an unrelated /url:.
+// Page chrome (nav tabs, footer) either carries no /url: or a google.* one that
+// filterCamofoxSearchLinks drops as noise.
+func parseCamofoxSnapshotLinks(snapshot string) []camofoxLink {
+	var out []camofoxLink
+	title := ""
+	for _, line := range strings.Split(snapshot, "\n") {
+		if m := camofoxSnapshotLinkRe.FindStringSubmatch(line); m != nil {
+			title = strings.TrimSpace(m[1])
+			continue
+		}
+		if m := camofoxSnapshotURLRe.FindStringSubmatch(line); m != nil {
+			out = append(out, camofoxLink{Text: title, Href: m[1]})
+			title = ""
+		}
+	}
+	return out
 }
 
 // filterCamofoxSearchLinks turns the raw SERP anchors into up to limit organic
